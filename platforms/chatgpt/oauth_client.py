@@ -29,7 +29,10 @@ from .utils import (
     seed_oai_device_cookie,
 )
 from .sentinel_token import build_sentinel_token
-from .sentinel_browser import get_sentinel_token_via_browser
+from .sentinel_browser import (
+    get_sentinel_bundle_via_browser,
+    get_sentinel_token_via_browser,
+)
 
 
 class OAuthClient:
@@ -391,6 +394,21 @@ class OAuthClient:
             state.current_url or "",
         )
 
+    def _build_har_authorize_params(self, *, code_challenge: str, oauth_state: str):
+        """按 HAR 强对齐的 /oauth/authorize 参数。"""
+        return {
+            "client_id": self.oauth_client_id,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "codex_cli_simplified_flow": "true",
+            "id_token_add_organizations": "true",
+            "prompt": "login",
+            "redirect_uri": self.oauth_redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile offline_access",
+            "state": oauth_state,
+        }
+
     def _extract_code_from_state(self, state: FlowState):
         for candidate in (
             state.continue_url,
@@ -698,6 +716,7 @@ class OAuthClient:
                 "prompt": "login",
                 "ext-oai-did": device_id,
                 "auth_session_logging_id": str(uuid.uuid4()),
+                "ext-passkey-client-capabilities": "1111",
                 "screen_hint": "login_or_signup",
                 "login_hint": email,
             }
@@ -822,14 +841,11 @@ class OAuthClient:
             content_type="application/json",
             fetch_site="same-origin",
             extra_headers={
-                "oai-device-id": device_id,
                 "openai-sentinel-token": sentinel_token,
             },
         )
         headers.update(generate_datadog_trace())
         payload = {"username": {"kind": "email", "value": email}}
-        if screen_hint:
-            payload["screen_hint"] = str(screen_hint).strip()
 
         try:
             kwargs = {
@@ -949,7 +965,6 @@ class OAuthClient:
             content_type="application/json",
             fetch_site="same-origin",
             extra_headers={
-                "oai-device-id": device_id,
                 "openai-sentinel-token": sentinel_pwd,
             },
         )
@@ -1147,12 +1162,13 @@ class OAuthClient:
         self._log("步骤4: 触发注册邮箱 OTP")
 
         request_url = f"{self.oauth_issuer}/api/accounts/email-otp/send"
+        send_referer = referer or f"{self.oauth_issuer}/create-account/password"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
             sec_ch_ua=sec_ch_ua,
             accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            referer=referer or f"{self.oauth_issuer}/create-account/password",
+            referer=send_referer,
             navigation=True,
             fetch_site="same-origin",
         )
@@ -1161,7 +1177,7 @@ class OAuthClient:
         try:
             kwargs = {
                 "headers": headers,
-                "allow_redirects": True,
+                "allow_redirects": False,
                 "timeout": 30,
             }
             if impersonate:
@@ -1170,17 +1186,20 @@ class OAuthClient:
             self._browser_pause()
             r = self.session.get(request_url, **kwargs)
             self._log(f"/email-otp/send -> {r.status_code}")
-            if r.status_code != 200:
+            if r.status_code not in (200, 302, 303, 307, 308):
                 self._set_error(f"发送注册 OTP 失败: {r.status_code} - {r.text[:180]}")
                 return None
 
-            verify_url = f"{self.oauth_issuer}/email-verification"
+            verify_url = normalize_flow_url(
+                r.headers.get("Location", ""),
+                auth_base=self.oauth_issuer,
+            ) or f"{self.oauth_issuer}/email-verification"
             verify_headers = self._headers(
                 verify_url,
                 user_agent=user_agent,
                 sec_ch_ua=sec_ch_ua,
                 accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                referer=referer or f"{self.oauth_issuer}/create-account/password",
+                referer=send_referer,
                 navigation=True,
             )
             verify_kwargs = {
@@ -1255,24 +1274,10 @@ class OAuthClient:
 
         code_verifier, code_challenge = generate_pkce()
         oauth_state = secrets.token_urlsafe(32)
-        authorize_params = {
-            "response_type": "code",
-            "client_id": self.oauth_client_id,
-            "audience": "https://api.openai.com/v1",
-            "redirect_uri": self.oauth_redirect_uri,
-            "scope": "openid profile email offline_access",
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "state": oauth_state,
-            "prompt": "login",
-            "login_hint": email,
-            "screen_hint": "login_or_signup",
-            "ext-oai-did": device_id,
-            "auth_session_logging_id": str(uuid.uuid4()),
-            "ext-passkey-client-capabilities": "1111",
-            "codex_cli_simplified_flow": "true",
-            "id_token_add_organizations": "true",
-        }
+        authorize_params = self._build_har_authorize_params(
+            code_challenge=code_challenge,
+            oauth_state=oauth_state,
+        )
         authorize_url = f"{self.oauth_issuer}/oauth/authorize"
 
         seed_oai_device_cookie(self.session, device_id)
@@ -1290,7 +1295,7 @@ class OAuthClient:
             self._set_error("Bootstrap 失败")
             return None
 
-        continue_referer = f"{self.oauth_issuer}/create-account"
+        continue_referer = f"{self.oauth_issuer}/log-in"
         state = self._submit_authorize_continue(
             email,
             device_id,
@@ -1300,7 +1305,6 @@ class OAuthClient:
             impersonate=impersonate,
             authorize_url=authorize_url,
             authorize_params=authorize_params,
-            screen_hint="signup",
         )
         if not state:
             if not self.last_error:
@@ -1530,12 +1534,53 @@ class OAuthClient:
         }
         self._log("about_you 请求体已构建，准备 POST /api/accounts/create_account")
 
-        def _build_create_headers(sentinel_token: str = ""):
+        sentinel_token = ""
+        sentinel_so_token = ""
+
+        bundle = get_sentinel_bundle_via_browser(
+            flow="oauth_create_account",
+            proxy=self.proxy,
+            page_url=referer or about_you_url,
+            headless=self.browser_mode != "headed",
+            device_id=device_id,
+            include_session_observer_token=True,
+            log_fn=lambda msg: self._log(f"oauth_create_account: {msg}"),
+        )
+        if bundle:
+            sentinel_token = str(bundle.get("token") or "").strip()
+            sentinel_so_token = str(
+                bundle.get("session_observer_token") or ""
+            ).strip()
+            if sentinel_token:
+                self._log("oauth_create_account: 已通过 Playwright SentinelSDK 获取 token")
+            if sentinel_so_token:
+                self._log("oauth_create_account: 已通过 Playwright SentinelSDK 获取 so token")
+
+        if not sentinel_token:
+            sentinel_token = build_sentinel_token(
+                self.session,
+                device_id,
+                flow="oauth_create_account",
+                user_agent=user_agent,
+                sec_ch_ua=sec_ch_ua,
+                impersonate=impersonate,
+            ) or ""
+            if sentinel_token:
+                self._log("oauth_create_account: 已通过 HTTP PoW 获取 token")
+        if not sentinel_so_token:
+            self._log("oauth_create_account: 当前分支未获取到 so token（继续仅使用 sentinel token）")
+
+        def _build_create_headers(
+            sentinel_token: str = "",
+            sentinel_so_token: str = "",
+        ):
             extra_headers = {
                 "oai-device-id": device_id,
             }
             if sentinel_token:
                 extra_headers["openai-sentinel-token"] = sentinel_token
+            if sentinel_so_token:
+                extra_headers["openai-sentinel-so-token"] = sentinel_so_token
             headers_local = self._headers(
                 request_url,
                 user_agent=user_agent,
@@ -1550,10 +1595,16 @@ class OAuthClient:
             headers_local.update(generate_datadog_trace())
             return headers_local
 
-        def _post_create(sentinel_token: str = ""):
+        def _post_create(
+            sentinel_token: str = "",
+            sentinel_so_token: str = "",
+        ):
             kwargs = {
                 "json": payload,
-                "headers": _build_create_headers(sentinel_token),
+                "headers": _build_create_headers(
+                    sentinel_token=sentinel_token,
+                    sentinel_so_token=sentinel_so_token,
+                ),
                 "timeout": 30,
                 "allow_redirects": False,
             }
@@ -1563,7 +1614,7 @@ class OAuthClient:
             return self.session.post(request_url, **kwargs)
 
         try:
-            r = _post_create()
+            r = _post_create(sentinel_token, sentinel_so_token)
             self._log(f"/create_account -> {r.status_code}")
             self._log(
                 "about_you 响应: "
@@ -1588,7 +1639,7 @@ class OAuthClient:
                     self._set_error("无法获取 sentinel token (oauth_create_account)")
                     return None
 
-                r = _post_create(sentinel_token)
+                r = _post_create(sentinel_token, sentinel_so_token)
                 self._log(f"/create_account(重试) -> {r.status_code}")
                 self._log(
                     "about_you 重试响应: "
@@ -1724,15 +1775,10 @@ class OAuthClient:
 
         code_verifier, code_challenge = generate_pkce()
         oauth_state = secrets.token_urlsafe(32)
-        authorize_params = {
-            "response_type": "code",
-            "client_id": self.oauth_client_id,
-            "redirect_uri": self.oauth_redirect_uri,
-            "scope": "openid profile email offline_access",
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "state": oauth_state,
-        }
+        authorize_params = self._build_har_authorize_params(
+            code_challenge=code_challenge,
+            oauth_state=oauth_state,
+        )
         authorize_url = f"{self.oauth_issuer}/oauth/authorize"
 
         seed_oai_device_cookie(self.session, device_id)
@@ -1775,7 +1821,6 @@ class OAuthClient:
             impersonate=impersonate,
             authorize_url=authorize_url,
             authorize_params=authorize_params,
-            screen_hint=str(screen_hint or "login"),
         )
         if not state:
             if not self.last_error:
@@ -3007,9 +3052,6 @@ class OAuthClient:
                 or state.continue_url
                 or f"{self.oauth_issuer}/email-verification",
                 fetch_site="same-origin",
-                extra_headers={
-                    "oai-device-id": device_id,
-                },
             )
             headers.update(generate_datadog_trace())
             try:
@@ -3034,36 +3076,9 @@ class OAuthClient:
             or state.continue_url
             or f"{self.oauth_issuer}/email-verification"
         )
-        sentinel_otp = get_sentinel_token_via_browser(
-            flow="email_otp_validate",
-            proxy=self.proxy,
-            page_url=otp_referer,
-            headless=self.browser_mode != "headed",
-            device_id=device_id,
-            log_fn=lambda msg: self._log(f"email_otp_validate: {msg}"),
-        )
-        if sentinel_otp:
-            self._log("email_otp_validate: 已通过 Playwright SentinelSDK 获取 token")
-        else:
-            sentinel_otp = build_sentinel_token(
-                self.session,
-                device_id,
-                flow="email_otp_validate",
-                user_agent=user_agent,
-                sec_ch_ua=sec_ch_ua,
-                impersonate=impersonate,
-            )
-            if sentinel_otp:
-                self._log("email_otp_validate: 已通过 HTTP PoW 获取 token")
-            else:
-                self._log("email_otp_validate: 未生成 sentinel token（继续尝试）")
+        self._log("email_otp_validate: HAR 对齐模式，不附带 sentinel / oai-device-id 头")
 
         def _build_otp_headers():
-            extra_headers = {
-                "oai-device-id": device_id,
-            }
-            if sentinel_otp:
-                extra_headers["openai-sentinel-token"] = sentinel_otp
             headers_otp = self._headers(
                 request_url,
                 user_agent=user_agent,
@@ -3073,7 +3088,6 @@ class OAuthClient:
                 origin=self.oauth_issuer,
                 content_type="application/json",
                 fetch_site="same-origin",
-                extra_headers=extra_headers,
             )
             headers_otp.update(generate_datadog_trace())
             return headers_otp

@@ -18,7 +18,9 @@ except ImportError:
     sys.exit(1)
 
 from .sentinel_token import build_sentinel_token
-from .sentinel_browser import get_sentinel_token_via_browser
+from .sentinel_browser import (
+    get_sentinel_bundle_via_browser,
+)
 from .utils import (
     FlowState,
     build_browser_headers,
@@ -133,21 +135,45 @@ class ChatGPTClient:
         self.last_stage = ""
 
     def _get_sentinel_token(self, flow: str, *, page_url: str | None = None):
+        token, _ = self._get_sentinel_bundle(
+            flow,
+            page_url=page_url,
+            include_session_observer_token=False,
+        )
+        return token
+
+    def _get_sentinel_bundle(
+        self,
+        flow: str,
+        *,
+        page_url: str | None = None,
+        include_session_observer_token: bool = False,
+    ):
+        sentinel_token = None
+        sentinel_so_token = ""
         prefer_browser = flow in {"username_password_create", "oauth_create_account"}
         if prefer_browser:
-            token = get_sentinel_token_via_browser(
+            bundle = get_sentinel_bundle_via_browser(
                 flow=flow,
                 proxy=self.proxy,
                 page_url=page_url,
                 headless=self.browser_mode != "headed",
                 device_id=self.device_id,
+                include_session_observer_token=include_session_observer_token,
                 log_fn=lambda msg: self._log(msg),
             )
-            if token:
+            if bundle:
+                sentinel_token = str(bundle.get("token") or "").strip() or None
+                sentinel_so_token = str(
+                    bundle.get("session_observer_token") or ""
+                ).strip()
+            if sentinel_token:
                 self._log(f"{flow}: 已通过 Playwright SentinelSDK 获取 token")
-                return token
+                if include_session_observer_token and sentinel_so_token:
+                    self._log(f"{flow}: 已通过 Playwright SentinelSDK 获取 so token")
+                return sentinel_token, sentinel_so_token
 
-        token = build_sentinel_token(
+        sentinel_token = build_sentinel_token(
             self.session,
             self.device_id,
             flow=flow,
@@ -155,9 +181,11 @@ class ChatGPTClient:
             sec_ch_ua=self.sec_ch_ua,
             impersonate=self.impersonate,
         )
-        if token:
+        if sentinel_token:
             self._log(f"{flow}: 已通过 HTTP PoW 获取 token")
-        return token
+        if include_session_observer_token and not sentinel_so_token:
+            self._log(f"{flow}: 当前分支未获取到 so token（继续仅使用 sentinel token）")
+        return sentinel_token, sentinel_so_token
 
     def _log(self, msg):
         """输出日志"""
@@ -273,6 +301,10 @@ class ChatGPTClient:
         )
 
     def _is_registration_complete_state(self, state: FlowState):
+        # 若仍有 callback/continue_url 待跟随，不应提前判定完成。
+        if self._state_requires_navigation(state):
+            return False
+
         current_url = (state.current_url or "").lower()
         continue_url = (state.continue_url or "").lower()
         page_type = state.page_type or ""
@@ -304,6 +336,12 @@ class ChatGPTClient:
     def _state_requires_navigation(self, state: FlowState):
         if (state.method or "GET").upper() != "GET":
             return False
+        target = f"{state.continue_url or ''} {state.current_url or ''}".lower()
+        if state.source == "api" and (
+            state.page_type in {"callback", "oauth_callback", "external_url"}
+            or "/api/auth/callback/" in target
+        ):
+            return True
         if state.page_type == "external_url" and state.continue_url:
             return True
         if state.continue_url and state.continue_url != state.current_url:
@@ -607,6 +645,7 @@ class ChatGPTClient:
             "prompt": "login",
             "ext-oai-did": self.device_id,
             "auth_session_logging_id": str(uuid.uuid4()),
+            "ext-passkey-client-capabilities": "1111",
             "screen_hint": "login_or_signup",
             "login_hint": email,
         }
@@ -770,6 +809,8 @@ class ChatGPTClient:
         self._enter_stage("otp", "send email otp")
         self._log("触发发送验证码...")
         url = f"{self.AUTH}/api/accounts/email-otp/send"
+        verify_url = f"{self.AUTH}/email-verification"
+        send_referer = referer or f"{self.AUTH}/create-account/password"
 
         try:
             self._browser_pause()
@@ -777,29 +818,39 @@ class ChatGPTClient:
                 url,
                 headers=self._headers(
                     url,
-                    accept="application/json, text/plain, */*",
-                    referer=referer or f"{self.AUTH}/create-account/password",
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    referer=send_referer,
+                    navigation=True,
                     fetch_site="same-origin",
+                ),
+                allow_redirects=False,
+                timeout=30,
+            )
+            self._log(f"验证码发送状态: {r.status_code}")
+            if r.status_code not in (200, 302, 303, 307, 308):
+                self._log(f"验证码发送失败响应: {r.text[:180]}")
+                return False
+
+            location = normalize_flow_url(
+                r.headers.get("Location", ""), auth_base=self.AUTH
+            )
+            if r.status_code in (302, 303, 307, 308) and location:
+                self._log(f"验证码发送重定向: {location[:120]}")
+                verify_url = location
+
+            self._browser_pause(0.12, 0.25)
+            r_verify = self.session.get(
+                verify_url,
+                headers=self._headers(
+                    verify_url,
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    referer=send_referer,
+                    navigation=True,
                 ),
                 allow_redirects=True,
                 timeout=30,
             )
-            self._log(f"验证码发送状态: {r.status_code}")
-            if r.status_code != 200:
-                self._log(f"验证码发送失败响应: {r.text[:180]}")
-                return False
-
-            try:
-                payload = r.json()
-            except Exception:
-                payload = {}
-
-            if isinstance(payload, dict) and payload:
-                next_state = self._state_from_payload(payload, current_url=str(r.url) or url)
-                self._log(f"验证码发送响应: {describe_flow_state(next_state)}")
-                self._log(f"otp/send 当前 URL: {str(r.url)[:120]}")
-            else:
-                self._log("验证码发送响应: 非 JSON（按已触发处理）")
+            self._log(f"/email-verification -> {r_verify.status_code}")
             return True
         except Exception as e:
             self._log(f"发送验证码失败: {e}")
@@ -872,14 +923,17 @@ class ChatGPTClient:
         self._log(f"完成账号创建: {name}")
         url = f"{self.AUTH}/api/accounts/create_account"
 
-        sentinel_token = self._get_sentinel_token(
+        sentinel_token, sentinel_so_token = self._get_sentinel_bundle(
             "oauth_create_account",
             page_url=f"{self.AUTH}/about-you",
+            include_session_observer_token=True,
         )
         if sentinel_token:
             self._log("create_account: 已生成 sentinel token")
         else:
             self._log("create_account: 未生成 sentinel token，降级继续请求")
+        if sentinel_so_token:
+            self._log("create_account: 已生成 sentinel so token")
 
         headers = self._headers(
             url,
@@ -894,6 +948,8 @@ class ChatGPTClient:
         )
         if sentinel_token:
             headers["openai-sentinel-token"] = sentinel_token
+        if sentinel_so_token:
+            headers["openai-sentinel-so-token"] = sentinel_so_token
         headers.update(generate_datadog_trace())
 
         payload = {

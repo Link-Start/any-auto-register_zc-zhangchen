@@ -282,7 +282,7 @@ def _get_sentinel_token_via_quickjs(
             pass
 
 
-def get_sentinel_token_via_browser(
+def get_sentinel_bundle_via_browser(
     *,
     flow: str,
     proxy: Optional[str] = None,
@@ -290,20 +290,26 @@ def get_sentinel_token_via_browser(
     page_url: Optional[str] = None,
     headless: bool = True,
     device_id: Optional[str] = None,
+    include_session_observer_token: bool = False,
     log_fn: Optional[Callable[[str], None]] = None,
-) -> Optional[str]:
-    """通过浏览器直接调用 SentinelSDK.token(flow) 获取完整 token。"""
+) -> Optional[dict[str, str]]:
+    """通过浏览器调用 SentinelSDK.token(flow)，可选同时获取 sessionObserverToken。"""
     logger = log_fn or (lambda _msg: None)
 
     if is_authenticated_socks5_proxy(proxy):
         logger("Sentinel 检测到带认证 SOCKS5 代理: 跳过浏览器，改用 QuickJS 获取 token")
-        return _get_sentinel_token_via_quickjs(
+        token = _get_sentinel_token_via_quickjs(
             flow=flow,
             proxy=proxy,
             timeout_ms=timeout_ms,
             device_id=device_id,
             logger=logger,
         )
+        if not token:
+            return None
+        if include_session_observer_token:
+            logger("Sentinel QuickJS 暂不支持 sessionObserverToken，继续仅使用 sentinel token")
+        return {"token": token}
 
     try:
         from playwright.sync_api import sync_playwright
@@ -362,18 +368,69 @@ def get_sentinel_token_via_browser(
                     pass
 
             page = context.new_page()
+            page.set_default_timeout(timeout_ms)
+            logger("Sentinel Browser 页面已创建，开始加载目标地址")
             page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            logger("Sentinel Browser 页面已加载，等待 SentinelSDK 就绪")
             page.wait_for_function(
                 "() => typeof window.SentinelSDK !== 'undefined' && typeof window.SentinelSDK.token === 'function'",
                 timeout=min(timeout_ms, 15000),
             )
+            logger("Sentinel Browser SentinelSDK 已就绪，开始取 token")
 
             result = page.evaluate(
                 """
-                async ({ flow }) => {
+                async ({
+                    flow,
+                    includeSessionObserverToken,
+                    initTimeoutMs,
+                    tokenTimeoutMs,
+                    soTimeoutMs,
+                }) => {
+                    const withTimeout = async (promise, ms, tag) => {
+                        let timer = null;
+                        try {
+                            return await Promise.race([
+                                Promise.resolve(promise),
+                                new Promise((_, reject) => {
+                                    timer = setTimeout(
+                                        () => reject(new Error(`${tag}_timeout_${ms}ms`)),
+                                        ms,
+                                    );
+                                }),
+                            ]);
+                        } finally {
+                            if (timer) clearTimeout(timer);
+                        }
+                    };
+
                     try {
-                        const token = await window.SentinelSDK.token(flow);
-                        return { success: true, token };
+                        const sdk = window.SentinelSDK;
+                        // 兼容旧实现：默认不调用 init，避免个别流里阻塞。
+                        // 仅在需要 sessionObserverToken 时尝试初始化，且失败不终止 token 获取。
+                        if (includeSessionObserverToken && typeof sdk.init === 'function') {
+                            try {
+                                await withTimeout(sdk.init(flow), initTimeoutMs, "init");
+                            } catch (_e) {}
+                        }
+                        const token = await withTimeout(
+                            sdk.token(flow),
+                            tokenTimeoutMs,
+                            "token",
+                        );
+                        let sessionObserverToken = null;
+                        if (includeSessionObserverToken && typeof sdk.sessionObserverToken === 'function') {
+                            try {
+                                sessionObserverToken = await withTimeout(
+                                    sdk.sessionObserverToken(flow),
+                                    soTimeoutMs,
+                                    "session_observer_token",
+                                );
+                            } catch (_e) {
+                                sessionObserverToken = null;
+                            }
+                        }
+                        return { success: true, token, sessionObserverToken };
                     } catch (e) {
                         return {
                             success: false,
@@ -382,7 +439,13 @@ def get_sentinel_token_via_browser(
                     }
                 }
                 """,
-                {"flow": flow},
+                {
+                    "flow": flow,
+                    "includeSessionObserverToken": bool(include_session_observer_token),
+                    "initTimeoutMs": max(3000, min(8000, int(timeout_ms * 0.2))),
+                    "tokenTimeoutMs": max(12000, min(30000, int(timeout_ms * 0.75))),
+                    "soTimeoutMs": max(6000, min(15000, int(timeout_ms * 0.35))),
+                },
             )
 
             if not result or not result.get("success") or not result.get("token"):
@@ -397,20 +460,56 @@ def get_sentinel_token_via_browser(
                 logger("Sentinel Browser 返回空 token")
                 return None
 
+            so_token = str(result.get("sessionObserverToken") or "").strip()
+            bundle: dict[str, str] = {"token": token}
+            if so_token:
+                bundle["session_observer_token"] = so_token
+
             try:
                 parsed = json.loads(token)
                 logger(
                     "Sentinel Browser 成功: "
                     f"p={'OK' if parsed.get('p') else 'X'} "
                     f"t={'OK' if parsed.get('t') else 'X'} "
-                    f"c={'OK' if parsed.get('c') else 'X'}"
+                    f"c={'OK' if parsed.get('c') else 'X'} "
+                    f"so={'OK' if so_token else 'X'}"
                 )
             except Exception:
-                logger(f"Sentinel Browser 成功: len={len(token)}")
+                logger(
+                    f"Sentinel Browser 成功: len={len(token)} "
+                    f"so={'OK' if so_token else 'X'}"
+                )
 
-            return token
+            return bundle
         except Exception as e:
             logger(f"Sentinel Browser 异常: {e}")
             return None
         finally:
             browser.close()
+
+
+def get_sentinel_token_via_browser(
+    *,
+    flow: str,
+    proxy: Optional[str] = None,
+    timeout_ms: int = 45000,
+    page_url: Optional[str] = None,
+    headless: bool = True,
+    device_id: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """通过浏览器直接调用 SentinelSDK.token(flow) 获取 token。"""
+    bundle = get_sentinel_bundle_via_browser(
+        flow=flow,
+        proxy=proxy,
+        timeout_ms=timeout_ms,
+        page_url=page_url,
+        headless=headless,
+        device_id=device_id,
+        include_session_observer_token=False,
+        log_fn=log_fn,
+    )
+    if not bundle:
+        return None
+    token = str(bundle.get("token") or "").strip()
+    return token or None
