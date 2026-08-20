@@ -165,6 +165,41 @@ class RefreshTokenBackfillerTests(unittest.TestCase):
         self.assertIn("临时邮箱已过期", str(ctx.exception))
 
 
+class ProtocolOverridesTests(unittest.TestCase):
+    """传给协议层的开关，决定了两条策略跑的到底是不是各自那条路。"""
+
+    def _overrides_for(self, flows):
+        with mock.patch("platforms.chatgpt.rt_backfill.AuthFlow") as flow_cls:
+            flow_cls.side_effect = list(flows)
+            RefreshTokenBackfiller(
+                email="demo@example.com",
+                password="pw",
+                session_token="st-old",
+                extra_config={"mailbox_otp_timeout_seconds": "90"},
+            ).run()
+        return [call.kwargs["env_overrides"] for call in flow_cls.call_args_list]
+
+    def test_session_strategy_drops_prompt_login(self):
+        overrides = self._overrides_for([_FakeFlow(session_result={"refresh_token": "rt"})])
+
+        self.assertEqual(overrides[0]["OAUTH_CODEX_PROMPT"], "")
+        self.assertNotIn("OAUTH_REFRESH_ONLY", overrides[0])
+
+    def test_login_strategy_asks_only_for_refresh_token(self):
+        overrides = self._overrides_for(
+            [_FakeFlow(), _FakeFlow(login_result={"refresh_token": "rt"})]
+        )
+
+        self.assertEqual(overrides[1]["OAUTH_REFRESH_ONLY"], "1")
+        self.assertEqual(overrides[1]["WEBUI_ALLOW_LOGIN"], "1")
+        self.assertNotIn("OAUTH_CODEX_PROMPT", overrides[1])
+
+    def test_otp_timeout_comes_from_config(self):
+        overrides = self._overrides_for([_FakeFlow(session_result={"refresh_token": "rt"})])
+
+        self.assertEqual(overrides[0]["OTP_TIMEOUT"], "90")
+
+
 class BackfillPersistenceTests(unittest.TestCase):
     def _result(self, **overrides):
         from platforms.chatgpt.rt_backfill import BackfillAttempt, BackfillResult

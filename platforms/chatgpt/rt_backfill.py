@@ -38,6 +38,14 @@ _BASE_OVERRIDES = {
     "OAUTH_CODEX_RT_ALLOW_RETRY": "1",
 }
 
+_SESSION_OVERRIDES = {
+    **_BASE_OVERRIDES,
+    # 复用会话的全部意义就在于不重新登录，而 Codex authorize 默认带的
+    # prompt=login 恰恰是"忽略现有会话，重走登录页"。这里必须清掉，否则
+    # 第一次授权必然被打到 /log-in，白跑一趟才轮到去掉 prompt 的兜底。
+    "OAUTH_CODEX_PROMPT": "",
+}
+
 _LOGIN_OVERRIDES = {
     **_BASE_OVERRIDES,
     # 只要 RT：跳过 get_auth_session 这些为了刷 session 才做的请求
@@ -189,7 +197,7 @@ class RefreshTokenBackfiller:
 
     def _try_session(self) -> AuthFlow:
         self.log(f"[补RT] 尝试复用已有会话: {self.email}")
-        flow = self._build_flow(_BASE_OVERRIDES)
+        flow = self._build_flow(_SESSION_OVERRIDES)
         flow.from_existing_credentials(self.session_token, self.access_token, self.device_id)
         if not (flow.result.access_token or flow.result.session_token):
             raise RuntimeError("库里的 session/access token 已失效")
