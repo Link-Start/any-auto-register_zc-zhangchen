@@ -1295,7 +1295,15 @@ class AuthFlow:
         phone_raw = self._get_env("OPENAI_PHONE_NUMBER", "").strip()
         phone_candidates = [x.strip() for x in phone_raw.split(",") if x.strip()]
         if not phone_candidates:
-            logger.warning("命中 add-phone，但未配置 SMS 接码 / OPENAI_PHONE_NUMBER，无法继续推进")
+            if self._sms_callback is not None:
+                # 走到这里说明接码是配了的，只是刚失败回落过来。再说一遍"未配置"会
+                # 把人引到设置页去找一个根本没问题的开关。
+                logger.warning(
+                    "命中 add-phone：SMS 接码本轮没绑成号，也没配 OPENAI_PHONE_NUMBER 兜底，"
+                    "本次无法继续推进"
+                )
+            else:
+                logger.warning("命中 add-phone，但未配置 SMS 接码 / OPENAI_PHONE_NUMBER，无法继续推进")
             return continue_url or ""
 
         try:

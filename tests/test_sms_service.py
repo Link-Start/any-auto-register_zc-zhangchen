@@ -425,6 +425,36 @@ class PhoneCallbackControllerTests(unittest.TestCase):
 
         self.assertEqual(controller._resolve_country_candidates(provider), ["16"])
 
+    def test_off_whitelist_country_is_called_out_once(self):
+        """尼日利亚这类号段 OpenAI 会改走 WhatsApp，日志里得说清楚。"""
+        controller = self._controller(country="19")
+        provider = mock.Mock(spec=SmsActivateProvider)
+        provider.get_number.side_effect = [
+            SmsActivation(activation_id="1", phone_number="+2349160938262", country="19"),
+            SmsActivation(activation_id="2", phone_number="+2349116600547", country="19"),
+        ]
+        controller.provider = provider
+
+        controller.get_phone()
+        controller.get_phone()
+
+        hints = [line for line in self.logs if "白名单" in line]
+        self.assertEqual(len(hints), 1)
+        self.assertIn("尼日利亚", hints[0])
+        self.assertIn("泰国", hints[0])
+
+    def test_whitelisted_country_gets_no_hint(self):
+        controller = self._controller(country="52")
+        provider = mock.Mock(spec=SmsActivateProvider)
+        provider.get_number.return_value = SmsActivation(
+            activation_id="1", phone_number="+66123", country="52"
+        )
+        controller.provider = provider
+
+        controller.get_phone()
+
+        self.assertEqual([line for line in self.logs if "白名单" in line], [])
+
     def test_get_phone_then_code_then_success(self):
         controller = self._controller(country="52")
         provider = mock.Mock(spec=SmsActivateProvider)

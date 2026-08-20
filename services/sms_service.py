@@ -869,6 +869,7 @@ class PhoneCallbackController:
         self.activation: Optional[SmsActivation] = None
         self.completed = False
         self._verify_lock_acquired = False
+        self._warned_off_whitelist = False
 
     def _ensure_provider(self) -> BaseSmsProvider:
         if self.provider is None:
@@ -909,6 +910,16 @@ class PhoneCallbackController:
             f"国家={country_label(used_country)} "
             f"(activation_id={self.activation.activation_id})"
         )
+        # 白名单外的号段，OpenAI 常把验证改走 WhatsApp，接码平台就永远等不到短信。
+        # 这时"发送成功但收不到码"看起来像平台的问题，其实是选错了国家。
+        if used_country not in OPENAI_SMS_COUNTRIES and not self._warned_off_whitelist:
+            self._warned_off_whitelist = True
+            whitelist = "、".join(country_label(c) for c in sorted(OPENAI_SMS_COUNTRIES))
+            self.log(
+                f"提醒: {country_label(used_country)} 不在 OpenAI 纯短信白名单（{whitelist}）；"
+                "这些号段 OpenAI 可能改用 WhatsApp 发码，会出现"
+                "「发送成功但一直等不到短信」"
+            )
         return self.activation.phone_number
 
     def _resolve_country_candidates(self, provider: BaseSmsProvider) -> list[str]:
