@@ -2955,6 +2955,14 @@ class AuthFlow:
         1) 尝试多来源 code_verifier（query/cookie/dump/hydra）
         2) 回退无 verifier
         """
+        # RT 已经到手（多半是 Codex 那条独立链路换来的）就别再跑这条老路了：
+        # 它会拿另一条链路的 code 配上 Codex 的 client_id/redirect_uri，加一串猜来的
+        # code_verifier 逐个试，结果必然是十几个 400 token_exchange_user_error——
+        # 除了在日志里制造"失败"假象，还平白给风控刷一串失败的 /oauth/token。
+        if self.result.refresh_token:
+            logger.info("已持有 refresh_token，跳过 OAuth Token 交换老路")
+            return True
+
         auth_code = self._extract_query_first(callback_url, ["code"]) or self._extract_query_first(continue_url, ["code"])
 
         if not auth_code:
@@ -3047,9 +3055,11 @@ class AuthFlow:
             self._trace_http(f"oauth_token_exchange_{mode}", resp, extra_request=extra_request)
             if resp.status_code == 200:
                 data = resp.json()
-                self.result.id_token = data.get("id_token", "")
+                # 缺字段就保留已有的：这条老路可能跑在 Codex 交换之后，响应里没带
+                # refresh_token 时用 "" 覆盖会把刚拿到手的 RT 抹掉。
+                self.result.id_token = data.get("id_token", self.result.id_token)
                 self.result.access_token = data.get("access_token", self.result.access_token)
-                self.result.refresh_token = data.get("refresh_token", "")
+                self.result.refresh_token = data.get("refresh_token", self.result.refresh_token)
                 logger.info(
                     "Token 交换成功(mode=%s): refresh_token=%s",
                     mode,
