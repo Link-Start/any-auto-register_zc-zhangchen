@@ -541,10 +541,6 @@ function MessageBody({ item }: { item: ICloudMessage }) {
     window.setTimeout(measure, 300)
   }, [])
 
-  useEffect(() => {
-    setHeight(240)
-  }, [item.id])
-
   if (!html) {
     const text = item.text_body?.trim() || item.snippet?.trim()
     return text ? (
@@ -595,7 +591,8 @@ function MessageDetail({ item }: { item: ICloudMessage }) {
           {formatDateTime(item.received_at)}
         </Text>
       </Space>
-      <MessageBody item={item} />
+      {/* key 让每封邮件重挂载，正文高度自然从初始值重新量起。 */}
+      <MessageBody key={item.id} item={item} />
     </div>
   )
 }
