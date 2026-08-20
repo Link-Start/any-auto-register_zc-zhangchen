@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/icloud", tags=["icloud"])
 
 # 业务错误码到 HTTP 状态码的映射，未列出的按 502 处理。
+#
+# 这里一律不用 401：401 是面板自己的登录态语义，前端见到就会清 token 跳登录页。
+# iCloud 主号的凭据问题是另一回事（是 Apple 那边不认，不是你没登录本面板），
+# 用 401 表达会让用户在验证弹窗里点一下保存就被踢出去。
 _ERROR_STATUS = {
     "account_not_found": 404,
     "alias_not_found": 404,
@@ -32,8 +36,8 @@ _ERROR_STATUS = {
     "login_session_expired": 410,
     "invalid_config": 400,
     "invalid_verification_code": 400,
-    "invalid_credentials": 401,
-    "session_expired": 401,
+    "invalid_credentials": 400,
+    "session_expired": 409,
     "credentials_unreadable": 409,
     "mail_access_denied": 403,
     "provider_rate_limited": 429,

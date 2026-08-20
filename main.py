@@ -16,7 +16,7 @@ from api.proxies import router as proxies_router
 from api.config import router as config_router
 from api.actions import router as actions_router
 from api.integrations import router as integrations_router
-from api.auth import router as auth_router
+from api.auth import PANEL_AUTH_HEADERS, router as auth_router
 from api.mail_imports import router as mail_imports_router
 from api.outlook import router as outlook_router
 from api.contribution import router as contribution_router
@@ -89,12 +89,18 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        return JSONResponse({"detail": "未认证，请先登录"}, status_code=401)
+        return JSONResponse(
+            {"detail": "未认证，请先登录"}, status_code=401, headers=PANEL_AUTH_HEADERS
+        )
     try:
         from api.auth import verify_token
         verify_token(auth_header[7:])
     except HTTPException as e:
-        return JSONResponse({"detail": e.detail}, status_code=e.status_code)
+        return JSONResponse(
+            {"detail": e.detail},
+            status_code=e.status_code,
+            headers=PANEL_AUTH_HEADERS if e.status_code == 401 else None,
+        )
     return await call_next(request)
 
 

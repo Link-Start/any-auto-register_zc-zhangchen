@@ -13,6 +13,10 @@ export function clearToken(): void {
   localStorage.removeItem('auth_token')
 }
 
+// 后端只在"面板登录态失效"时带上这个头。业务接口也可能回 401（比如上游服务不认
+// 你提交的凭据），那种情况只该把错误显示出来，不能把人踢回登录页。
+export const PANEL_AUTH_HEADER = 'X-Panel-Auth-Required'
+
 export async function apiFetch(path: string, opts?: RequestInit) {
   const token = getToken()
   const baseHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -21,7 +25,7 @@ export async function apiFetch(path: string, opts?: RequestInit) {
     ...opts,
     headers: { ...baseHeaders, ...(opts?.headers as Record<string, string> || {}) },
   })
-  if (res.status === 401) {
+  if (res.status === 401 && res.headers.get(PANEL_AUTH_HEADER)) {
     clearToken()
     if (window.location.pathname !== '/login') {
       window.location.href = '/login'

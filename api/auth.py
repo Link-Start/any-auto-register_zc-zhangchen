@@ -19,6 +19,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 _bearer = HTTPBearer(auto_error=False)
 
+# 只有"面板登录态失效"才带这个头。业务接口同样会用 401（例如 iCloud 主号的
+# Apple 密码错误），前端靠这个头区分，避免把用户踢回登录页。
+PANEL_AUTH_HEADERS = {"X-Panel-Auth-Required": "1"}
+
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
 
@@ -68,24 +72,26 @@ def verify_token(token: str) -> dict:
     try:
         header, payload, sig = token.split(".")
     except ValueError:
-        raise HTTPException(status_code=401, detail="无效的令牌")
+        raise HTTPException(status_code=401, detail="无效的令牌", headers=PANEL_AUTH_HEADERS)
     expected = _b64url_encode(
         hmac.new(_jwt_secret().encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
     )
     if not hmac.compare_digest(sig, expected):
-        raise HTTPException(status_code=401, detail="令牌签名无效")
+        raise HTTPException(status_code=401, detail="令牌签名无效", headers=PANEL_AUTH_HEADERS)
     try:
         data = _json.loads(_b64url_decode(payload))
     except Exception:
-        raise HTTPException(status_code=401, detail="令牌格式错误")
+        raise HTTPException(status_code=401, detail="令牌格式错误", headers=PANEL_AUTH_HEADERS)
     if data.get("exp", 0) < time.time():
-        raise HTTPException(status_code=401, detail="令牌已过期，请重新登录")
+        raise HTTPException(
+            status_code=401, detail="令牌已过期，请重新登录", headers=PANEL_AUTH_HEADERS
+        )
     return data
 
 
 def require_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer)) -> None:
     if credentials is None:
-        raise HTTPException(status_code=401, detail="未认证")
+        raise HTTPException(status_code=401, detail="未认证", headers=PANEL_AUTH_HEADERS)
     verify_token(credentials.credentials)
 
 
@@ -176,7 +182,7 @@ def setup_password(
     cfg = _cfg()
     if cfg.get("auth_password_hash", ""):
         if credentials is None:
-            raise HTTPException(status_code=401, detail="未认证")
+            raise HTTPException(status_code=401, detail="未认证", headers=PANEL_AUTH_HEADERS)
         verify_token(credentials.credentials)
     cfg.set("auth_password_hash", _hash_pw(body.password))
     token = create_token()
@@ -189,7 +195,7 @@ def disable_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_
     cfg = _cfg()
     if cfg.get("auth_password_hash", ""):
         if credentials is None:
-            raise HTTPException(status_code=401, detail="未认证")
+            raise HTTPException(status_code=401, detail="未认证", headers=PANEL_AUTH_HEADERS)
         verify_token(credentials.credentials)
     cfg.set("auth_password_hash", "")
     cfg.set("auth_totp_secret", "")
