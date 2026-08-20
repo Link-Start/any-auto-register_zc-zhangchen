@@ -56,6 +56,27 @@ class MailboxProviderAdapter(MailProvider):
     def account(self) -> Optional[MailboxAccount]:
         return self._account
 
+    def bind_task_control(
+        self,
+        task_control=None,
+        *,
+        attempt_id=None,
+        log_fn=None,
+    ) -> None:
+        """把任务的停止/跳过开关和日志接到底层邮箱上。
+
+        ``BaseMailbox`` 的轮询循环每 0.25 秒查一次 ``_task_control``；不绑的话
+        "停止任务"要等整个 OTP 超时（默认三分钟）走完才生效，界面上看着像点了
+        没反应。``_log_fn`` 同理：不接的话等码那几分钟任务日志一行都不出。
+        """
+        if task_control is not None:
+            self._mailbox._task_control = task_control
+        if attempt_id is not None:
+            self._mailbox._task_attempt_token = attempt_id
+        if log_fn is not None:
+            # 邮箱实现自己会带 [微软邮箱] 这类前缀，这里不要再包一层
+            self._mailbox._log_fn = log_fn
+
     def create_mailbox(self) -> str:
         account = self._mailbox.get_email()
         self._account = account

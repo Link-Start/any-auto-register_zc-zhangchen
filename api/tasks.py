@@ -737,6 +737,8 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
                 proxy=proxy,
                 allow_login=req.allow_login,
                 log_fn=lambda msg: _log(task_id, f"  {msg}"),
+                task_control=control,
+                attempt_id=attempt_id,
             )
 
             with Session(engine) as s:

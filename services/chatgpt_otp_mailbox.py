@@ -49,9 +49,19 @@ class ICloudAliasMailProvider(MailProvider):
         self._poll_interval = max(float(poll_interval), 0.5)
         self._log = log_fn or logger.info
         self._seen: set[str] = set()
+        self._task_control = None
+        self._attempt_id = None
 
     def create_mailbox(self) -> str:
         return self._address
+
+    def bind_task_control(self, task_control=None, *, attempt_id=None, log_fn=None) -> None:
+        if task_control is not None:
+            self._task_control = task_control
+        if attempt_id is not None:
+            self._attempt_id = attempt_id
+        if log_fn is not None:
+            self._log = log_fn
 
     def prime(self) -> None:
         """记下现有邮件，免得把上一轮的旧码当成本轮的。"""
@@ -71,6 +81,7 @@ class ICloudAliasMailProvider(MailProvider):
         cutoff = (issued_after - 30) if issued_after else None
 
         while True:
+            self._checkpoint()
             try:
                 messages = self._fetch()
             except Exception as exc:
@@ -90,7 +101,20 @@ class ICloudAliasMailProvider(MailProvider):
 
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"iCloud 隐私邮箱 {self._address} 未收到验证码")
-            time.sleep(self._poll_interval)
+            self._sleep(min(self._poll_interval, deadline - time.monotonic()))
+
+    def _checkpoint(self) -> None:
+        if self._task_control is not None:
+            self._task_control.checkpoint(attempt_id=self._attempt_id)
+
+    def _sleep(self, seconds: float) -> None:
+        """碎步睡，好让"停止任务"在几百毫秒内生效而不是等满一个轮询间隔。"""
+        remaining = max(float(seconds), 0.0)
+        while remaining > 0:
+            self._checkpoint()
+            chunk = min(0.25, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
 
     def _fetch_messages(self) -> list:
         from services.icloud_service import fetch_alias_messages
@@ -130,8 +154,13 @@ def resolve_otp_mail_provider(
     proxy: Optional[str] = None,
     otp_timeout: Optional[int] = None,
     log_fn: Optional[Callable[[str], None]] = None,
+    task_control=None,
+    attempt_id=None,
 ) -> tuple[Optional[MailProvider], str]:
-    """给已注册账号的邮箱地址找一个能收验证码的 provider。"""
+    """给已注册账号的邮箱地址找一个能收验证码的 provider。
+
+    传了 ``task_control`` 的话，等码期间也能被任务的停止/跳过打断。
+    """
     address = (email or "").strip()
     if not address:
         return None, "账号没有邮箱地址"
@@ -154,12 +183,21 @@ def resolve_otp_mail_provider(
             reasons.append(str(exc))
             continue
         if provider is not None:
+            _bind_task_control(
+                provider, task_control=task_control, attempt_id=attempt_id, log_fn=log_fn
+            )
             _prime(provider)
             return provider, ""
         if reason:
             reasons.append(reason)
 
     return None, "；".join(reasons) or "没有匹配的收件通道"
+
+
+def _bind_task_control(provider: MailProvider, *, task_control, attempt_id, log_fn) -> None:
+    bind = getattr(provider, "bind_task_control", None)
+    if callable(bind):
+        bind(task_control, attempt_id=attempt_id, log_fn=log_fn)
 
 
 def _prime(provider: MailProvider) -> None:

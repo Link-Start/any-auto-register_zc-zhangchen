@@ -84,11 +84,16 @@ def backfill_account_data(
     proxy: Optional[str] = None,
     allow_login: bool = True,
     log_fn: Optional[Callable[[str], None]] = None,
+    task_control=None,
+    attempt_id=None,
 ) -> BackfillResult:
     """按账号字段补 RT，不落库（落库交给 ``apply_backfill_result``）。
 
     只收纯数据不收 ORM 对象：一个号要跑几十秒网络请求，调用方得以在这期间
     把数据库连接还回池子里。
+
+    ``task_control`` 传的是后台任务的停止/跳过开关，会一路交到邮箱的等码循环
+    里 —— 等验证码是整个补号流程里最长的一段，不接开关就停不下来。
     """
     from services.chatgpt_otp_mailbox import resolve_otp_mail_provider
 
@@ -102,9 +107,14 @@ def backfill_account_data(
         config=config,
         proxy=proxy,
         log_fn=log,
+        task_control=task_control,
+        attempt_id=attempt_id,
     )
-    if mail_provider is None and allow_login:
-        log(f"[补RT] {email} 暂时读不到收件箱（{mail_reason}），需要邮箱验证码时会失败")
+    if mail_provider is None:
+        if allow_login:
+            log(f"[补RT] {email} 暂时读不到收件箱（{mail_reason}），需要邮箱验证码时会失败")
+    else:
+        log(f"[补RT] 收件通道: {getattr(mail_provider, 'display_name', '邮箱')} → {email}")
 
     return RefreshTokenBackfiller(
         email=email,

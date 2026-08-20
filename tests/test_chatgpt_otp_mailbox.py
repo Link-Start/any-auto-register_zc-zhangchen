@@ -1,15 +1,30 @@
 """补 RT 时按【已知地址】反查收件通道。"""
 
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from core.base_mailbox import MailboxAccount
+from core.task_runtime import StopTaskRequested
 from platforms.chatgpt.protocol.mailbox_adapter import FixedAddressProviderAdapter
 from services.chatgpt_otp_mailbox import (
     ICloudAliasMailProvider,
     resolve_otp_mail_provider,
 )
+
+
+class _StubControl:
+    """记录 checkpoint 调用，可以在第 N 次抛停止。"""
+
+    def __init__(self, raise_after: int | None = None):
+        self.attempt_ids: list = []
+        self._raise_after = raise_after
+
+    def checkpoint(self, *, attempt_id=None, consume_skip=True):
+        self.attempt_ids.append(attempt_id)
+        if self._raise_after is not None and len(self.attempt_ids) > self._raise_after:
+            raise StopTaskRequested()
 
 
 class _Message:
@@ -111,6 +126,53 @@ class ICloudAliasProviderTests(unittest.TestCase):
             7, "alias@icloud.com", fetch=_fetch, poll_interval=0.5
         )
         self.assertEqual(provider.wait_for_otp("alias@icloud.com", timeout=5), "224466")
+
+
+class OtpWaitInterruptionTests(unittest.TestCase):
+    """等码是补号里最长的一段，"停止任务"必须能在这期间生效。"""
+
+    def test_alias_wait_is_interrupted_by_stop(self):
+        control = _StubControl(raise_after=1)
+        provider = ICloudAliasMailProvider(
+            7, "alias@icloud.com", fetch=lambda: [], poll_interval=5
+        )
+        provider.bind_task_control(control, attempt_id=3)
+
+        started = time.monotonic()
+        with self.assertRaises(StopTaskRequested):
+            provider.wait_for_otp("alias@icloud.com", timeout=120)
+
+        # 别等满 5 秒的轮询间隔，更别等满 120 秒的超时
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(control.attempt_ids, [3, 3])
+
+    def test_adapter_hands_control_and_log_to_the_mailbox(self):
+        mailbox = _StubMailbox(ids=set())
+        adapter = FixedAddressProviderAdapter(
+            mailbox, MailboxAccount(email="old@example.com"), kind="微软邮箱"
+        )
+        lines: list[str] = []
+        control = _StubControl()
+
+        adapter.bind_task_control(control, attempt_id=9, log_fn=lines.append)
+        mailbox._log_fn("[微软邮箱] OTP 收信后端: imap")
+
+        self.assertIs(mailbox._task_control, control)
+        self.assertEqual(mailbox._task_attempt_token, 9)
+        self.assertEqual(lines, ["[微软邮箱] OTP 收信后端: imap"])
+
+    def test_resolver_binds_control_onto_the_provider(self):
+        control = _StubControl()
+        with mock.patch.object(ICloudAliasMailProvider, "prime"), mock.patch(
+            "services.chatgpt_otp_mailbox._build_icloud_provider",
+            return_value=(ICloudAliasMailProvider(7, "alias@icloud.com", fetch=lambda: []), ""),
+        ):
+            provider, _ = resolve_otp_mail_provider(
+                "alias@icloud.com", task_control=control, attempt_id=5
+            )
+
+        self.assertIs(provider._task_control, control)
+        self.assertEqual(provider._attempt_id, 5)
 
 
 class ResolveProviderTests(unittest.TestCase):

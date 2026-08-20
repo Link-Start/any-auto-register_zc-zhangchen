@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
 
+from core.task_runtime import TaskInterruption
 from platforms.chatgpt.protocol import AuthFlow, Config, MailProvider
 
 logger = logging.getLogger(__name__)
@@ -242,6 +243,11 @@ class RefreshTokenBackfiller:
             try:
                 with mirror_protocol_logs(self._log_fn):
                     runner()
+            except TaskInterruption:
+                # 手动停止/跳过。不能按"这条策略失败了"处理往下走 —— 接着跑协议
+                # 重登正是按停止的人想躲开的那几十秒。
+                self.log("[补RT] 收到中断请求，不再尝试后续策略")
+                raise
             except Exception as exc:
                 failure = str(exc) or exc.__class__.__name__
                 self.log(f"[补RT] {self._label(strategy)}报错: {failure}")

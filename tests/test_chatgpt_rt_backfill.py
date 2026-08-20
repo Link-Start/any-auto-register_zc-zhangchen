@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from core.db import AccountModel
+from core.task_runtime import StopTaskRequested
 from platforms.chatgpt.rt_backfill import (
     STRATEGY_LOGIN,
     STRATEGY_SESSION,
@@ -35,11 +36,12 @@ class _AuthResult:
 class _FakeFlow:
     """只实现补 RT 会碰到的那几个 AuthFlow 方法。"""
 
-    def __init__(self, *, session_result=None, login_result=None, login_error=None):
+    def __init__(self, *, session_result=None, login_result=None, login_error=None, session_error=None):
         self.result = _AuthResult()
         self._session_result = session_result
         self._login_result = login_result
         self._login_error = login_error
+        self._session_error = session_error
         self.codex_calls = 0
         self.login_calls = []
 
@@ -51,6 +53,8 @@ class _FakeFlow:
 
     def oauth_codex_rt_exchange(self, mail_provider=None):
         self.codex_calls += 1
+        if self._session_error:
+            raise self._session_error
         if self._session_result:
             for key, value in self._session_result.items():
                 setattr(self.result, key, value)
@@ -156,6 +160,16 @@ class RefreshTokenBackfillerTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.refresh_token, "rt-login")
         self.assertIn("拉 session 超时", result.attempts[-1].message)
+
+    def test_interruption_does_not_fall_through_to_the_next_strategy(self):
+        """按了停止就别再跑协议重登 —— 那正是用户想省掉的几十秒。"""
+        session_flow = _FakeFlow(session_error=StopTaskRequested())
+        login_flow = _FakeFlow(login_result={"refresh_token": "rt-login"})
+
+        with self.assertRaises(StopTaskRequested):
+            _backfiller([session_flow, login_flow]).run()
+
+        self.assertEqual(login_flow.login_calls, [])
 
     def test_missing_email_fails_fast(self):
         result = RefreshTokenBackfiller(email=" ").run()
