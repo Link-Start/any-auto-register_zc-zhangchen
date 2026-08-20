@@ -666,7 +666,7 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
     from core.db import AccountModel
     from core.proxy_pool import proxy_pool
     from core.proxy_utils import normalize_proxy_url
-    from services.chatgpt_rt_backfill import apply_backfill_result, backfill_account
+    from services.chatgpt_rt_backfill import apply_backfill_result, backfill_account_data
 
     control = _task_store.control_for(task_id)
     _task_store.mark_running(task_id)
@@ -711,26 +711,38 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
             control.checkpoint(attempt_id=attempt_id)
 
             proxy = _resolve_proxy()
+            # 补一个号要跑好几十秒的网络请求，期间不能占着数据库连接不放：
+            # 连接池就那么几条，攥在手里会把面板其它请求一起拖住。
             with Session(engine) as s:
                 account = s.get(AccountModel, account_id)
                 if account is None or account.platform != "chatgpt":
                     _log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                     return AttemptResult.skipped("账号不存在")
-
                 email = account.email
-                _task_store.set_progress(task_id, f"{index + 1}/{total}")
-                _log(task_id, f"开始补 RT {index + 1}/{total}: {email}")
-                if proxy:
-                    _log(task_id, f"使用代理: {proxy}")
+                password = account.password
+                extra = account.get_extra()
+                token = account.token
 
-                result = backfill_account(
-                    account,
-                    config=base_config,
-                    proxy=proxy,
-                    allow_login=req.allow_login,
-                    log_fn=lambda msg: _log(task_id, f"  {msg}"),
-                )
-                apply_backfill_result(account, result, session=s, commit=True)
+            _task_store.set_progress(task_id, f"{index + 1}/{total}")
+            _log(task_id, f"开始补 RT {index + 1}/{total}: {email}")
+            if proxy:
+                _log(task_id, f"使用代理: {proxy}")
+
+            result = backfill_account_data(
+                email=email,
+                password=password,
+                extra=extra,
+                token=token,
+                config=base_config,
+                proxy=proxy,
+                allow_login=req.allow_login,
+                log_fn=lambda msg: _log(task_id, f"  {msg}"),
+            )
+
+            with Session(engine) as s:
+                account = s.get(AccountModel, account_id)
+                if account is not None:
+                    apply_backfill_result(account, result, session=s, commit=True)
 
             if result.success:
                 if proxy:

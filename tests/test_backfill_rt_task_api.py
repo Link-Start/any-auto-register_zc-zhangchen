@@ -122,6 +122,74 @@ class BackfillTaskEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("all_filtered", response.json()["detail"])
 
+    def test_runner_persists_result_and_finishes_task(self):
+        """TestClient 会在响应后同步跑后台任务，正好把整条链路串起来。"""
+        from platforms.chatgpt.rt_backfill import (
+            STRATEGY_SESSION,
+            BackfillAttempt,
+            BackfillResult,
+        )
+
+        result = BackfillResult(
+            success=True,
+            email="no-rt-1@example.com",
+            strategy=STRATEGY_SESSION,
+            refresh_token="rt-new",
+            access_token="at-new",
+            attempts=[BackfillAttempt(STRATEGY_SESSION, True, "拿到 refresh_token")],
+        )
+
+        with mock.patch(
+            "services.chatgpt_rt_backfill.backfill_account_data", return_value=result
+        ) as engine_call:
+            response = self.client.post(
+                "/tasks/backfill-rt", json={"all_filtered": True, "delay_seconds": 0}
+            )
+            task_id = response.json()["task_id"]
+            snapshot = self.client.get(f"/tasks/{task_id}").json()
+
+        engine_call.assert_called_once()
+        self.assertEqual(engine_call.call_args.kwargs["email"], "no-rt-1@example.com")
+        self.assertEqual(snapshot["status"], "done")
+        self.assertEqual(snapshot["success"], 1)
+
+        with Session(engine) as session:
+            account = session.exec(
+                select(AccountModel).where(AccountModel.email == "no-rt-1@example.com")
+            ).first()
+        extra = account.get_extra()
+        self.assertEqual(extra["refresh_token"], "rt-new")
+        self.assertEqual(account.token, "at-new")
+        self.assertTrue(extra["chatgpt_rt_backfill"]["ok"])
+
+    def test_runner_records_failure_without_touching_credentials(self):
+        from platforms.chatgpt.rt_backfill import STRATEGY_LOGIN, BackfillAttempt, BackfillResult
+
+        result = BackfillResult(
+            success=False,
+            email="no-rt-1@example.com",
+            error_message="补 RT 失败（协议重登：密码错误）",
+            attempts=[BackfillAttempt(STRATEGY_LOGIN, False, "密码错误")],
+        )
+
+        with mock.patch("services.chatgpt_rt_backfill.backfill_account_data", return_value=result):
+            response = self.client.post(
+                "/tasks/backfill-rt", json={"all_filtered": True, "delay_seconds": 0}
+            )
+            snapshot = self.client.get(f"/tasks/{response.json()['task_id']}").json()
+
+        self.assertEqual(snapshot["status"], "done")
+        self.assertEqual(snapshot["success"], 0)
+        self.assertEqual(len(snapshot["errors"]), 1)
+
+        with Session(engine) as session:
+            account = session.exec(
+                select(AccountModel).where(AccountModel.email == "no-rt-1@example.com")
+            ).first()
+        extra = account.get_extra()
+        self.assertNotIn("refresh_token", extra)
+        self.assertFalse(extra["chatgpt_rt_backfill"]["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

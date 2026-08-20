@@ -266,5 +266,72 @@ class BackfillAccountDataTests(unittest.TestCase):
         self.assertEqual(kwargs["mail_unavailable_reason"], "临时邮箱已过期")
 
 
+class PluginActionTests(unittest.TestCase):
+    """单个账号的补 RT 入口：平台动作 + 动作结果落库。"""
+
+    def _run_action(self, result):
+        from core.base_platform import Account, AccountStatus, RegisterConfig
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+
+        platform = ChatGPTPlatform(
+            config=RegisterConfig(proxy="http://127.0.0.1:7890", extra={"mail_provider": "cfworker"})
+        )
+        account = Account(
+            platform="chatgpt",
+            email="demo@example.com",
+            password="pw",
+            status=AccountStatus.REGISTERED,
+            token="at-old",
+            extra={"session_token": "st-old"},
+        )
+        with mock.patch(
+            "services.chatgpt_rt_backfill.backfill_account_data", return_value=result
+        ) as engine_call:
+            action_result = platform.execute_action("backfill_refresh_token", account, {})
+        return action_result, engine_call
+
+    def test_action_reports_success_and_returns_extra_patch(self):
+        from platforms.chatgpt.rt_backfill import BackfillResult
+
+        action_result, engine_call = self._run_action(
+            BackfillResult(success=True, strategy=STRATEGY_SESSION, refresh_token="rt-new")
+        )
+
+        self.assertTrue(action_result["ok"])
+        self.assertIn("补 RT 成功", action_result["data"]["message"])
+        self.assertEqual(action_result["account_extra_patch"]["refresh_token"], "rt-new")
+        kwargs = engine_call.call_args.kwargs
+        self.assertEqual(kwargs["proxy"], "http://127.0.0.1:7890")
+        self.assertEqual(kwargs["config"], {"mail_provider": "cfworker"})
+        self.assertTrue(kwargs["allow_login"])
+
+    def test_action_failure_surfaces_reason(self):
+        from platforms.chatgpt.rt_backfill import BackfillResult
+
+        action_result, _ = self._run_action(
+            BackfillResult(success=False, error_message="补 RT 失败（复用会话：会话失效）")
+        )
+
+        self.assertFalse(action_result["ok"])
+        self.assertIn("会话失效", action_result["error"])
+
+    def test_action_result_syncs_access_token_onto_the_account_row(self):
+        from api.actions import _apply_action_result
+
+        model = AccountModel(platform="chatgpt", email="demo@example.com", password="pw", token="at-old")
+        model.set_extra({"session_token": "st-old"})
+        result = {
+            "ok": True,
+            "data": {"message": "补 RT 成功（复用会话）"},
+            "account_extra_patch": {"refresh_token": "rt-new", "access_token": "at-new"},
+        }
+
+        _apply_action_result("chatgpt", "backfill_refresh_token", model, result, mock.Mock())
+
+        self.assertEqual(model.token, "at-new")
+        self.assertEqual(model.get_extra()["refresh_token"], "rt-new")
+        self.assertEqual(model.get_extra()["session_token"], "st-old")
+
+
 if __name__ == "__main__":
     unittest.main()

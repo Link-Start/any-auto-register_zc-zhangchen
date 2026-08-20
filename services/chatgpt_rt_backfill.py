@@ -74,28 +74,6 @@ def select_backfill_targets(
     return accounts, missing_ids
 
 
-def backfill_account(
-    model: AccountModel,
-    *,
-    config: Optional[dict] = None,
-    proxy: Optional[str] = None,
-    allow_login: bool = True,
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> BackfillResult:
-    """跑一个号的补 RT，不落库（落库交给 ``apply_backfill_result``）。"""
-    extra = model.get_extra()
-    return backfill_account_data(
-        email=model.email,
-        password=model.password,
-        extra=extra,
-        token=model.token,
-        config=config,
-        proxy=proxy,
-        allow_login=allow_login,
-        log_fn=log_fn,
-    )
-
-
 def backfill_account_data(
     *,
     email: str,
@@ -107,7 +85,11 @@ def backfill_account_data(
     allow_login: bool = True,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> BackfillResult:
-    """按账号字段补 RT，供没有 ORM 对象的调用方（平台动作）使用。"""
+    """按账号字段补 RT，不落库（落库交给 ``apply_backfill_result``）。
+
+    只收纯数据不收 ORM 对象：一个号要跑几十秒网络请求，调用方得以在这期间
+    把数据库连接还回池子里。
+    """
     from services.chatgpt_otp_mailbox import resolve_otp_mail_provider
 
     extra = dict(extra or {})
