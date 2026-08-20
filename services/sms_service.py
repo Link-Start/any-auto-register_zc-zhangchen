@@ -1,6 +1,5 @@
 """手机接码服务（sms-activate 协议系）。
 
-移植自 https://github.com/Regert888/gpt-auto-register 的 ``sms_provider.py``，
 供 ChatGPT 注册链路命中 ``add-phone`` 时自动租号、收码、验证。
 
 目前接入 SmsBower 与 HeroSMS，两家共用 sms-activate 的 ``handler_api.php`` 协议，

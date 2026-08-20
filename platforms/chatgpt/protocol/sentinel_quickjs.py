@@ -1,8 +1,5 @@
 """Sentinel PoW 求解器：在 Node 沙箱里跑 OpenAI 真实的 sdk.js。
 
-移植自 https://github.com/Regert888/gpt-auto-register 的 ``sentinel_quickjs.py``
-及配套的 ``openai_sentinel_quickjs.js``。
-
 为什么不能纯 Python 算：
   自己实现的 PoW 能通过 OpenAI 的表层校验（``/sentinel/req``、
   ``/authorize/continue`` 都返 200），但发码服务会在服务端跑真正的 sentinel SDK

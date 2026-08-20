@@ -1,11 +1,10 @@
 """协议层的邮箱抽象。
 
-移植自 https://github.com/Regert888/gpt-auto-register 的 ``mail_providers/base.py``，
 只保留 ``AuthFlow`` 真正会碰到的那部分接口 —— 本仓库的收件箱实现统一走
 ``core.base_mailbox.BaseMailbox``，注册引擎用 ``mailbox_adapter`` 把两者对上，
 所以导入格式、WebUI 表单自描述那些东西在这里没有意义。
 
-两个能力维度必须分清（沿用上游 docstring 的口径）：
+两个能力维度必须分清：
 
     pooled     号是"买来的、有限的、废了要换下一个"
                → 决定 AuthFlow 超时后要不要 retry、要不要 mark_dead

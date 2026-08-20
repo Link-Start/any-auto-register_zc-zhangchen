@@ -1,8 +1,7 @@
 """ChatGPT 注册协议栈。
 
-整套协议移植自 https://github.com/Regert888/gpt-auto-register：完全无浏览器，
-用 ``curl_cffi`` 模拟 TLS 指纹，用 Node 跑 OpenAI 真实 ``sdk.js`` 解 Sentinel PoW，
-直接驱动 ``auth.openai.com`` 的 authorize 状态机。
+整套协议完全无浏览器：用 ``curl_cffi`` 模拟 TLS 指纹，用 Node 跑 OpenAI 真实
+``sdk.js`` 解 Sentinel PoW，直接驱动 ``auth.openai.com`` 的 authorize 状态机。
 
 链路：
 
