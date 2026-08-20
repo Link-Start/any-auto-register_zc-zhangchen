@@ -46,6 +46,7 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: '手动',
   api: 'API',
   schedule: '调度',
+  backfill_rt: '补 RT',
 }
 
 const STATUS_CONFIG: Record<string, { color: string; label: string; icon?: React.ReactNode }> = {
