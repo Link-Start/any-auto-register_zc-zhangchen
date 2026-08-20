@@ -116,6 +116,12 @@ class BackfillTaskEndpointTests(unittest.TestCase):
         self.assertIn("已经有 RT", response.json()["detail"])
         runner.assert_not_called()
 
+    def test_missing_account_ids_say_so_instead_of_blaming_rt(self):
+        response = self.client.post("/tasks/backfill-rt", json={"account_ids": [999999]})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "所选账号不存在")
+
     def test_rejects_request_without_scope(self):
         response = self.client.post("/tasks/backfill-rt", json={})
 

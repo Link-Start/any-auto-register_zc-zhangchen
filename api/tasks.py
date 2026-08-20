@@ -861,7 +861,12 @@ def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: Backgr
         account_ids = [int(row.id) for row in accounts if row.id]
 
     if not account_ids:
-        detail = "所选账号都已经有 RT 了" if req.only_missing_rt else "没有匹配的账号"
+        if missing_ids:
+            detail = "所选账号不存在"
+        elif req.only_missing_rt:
+            detail = "所选账号都已经有 RT 了"
+        else:
+            detail = "没有匹配的账号"
         raise HTTPException(400, detail)
 
     task_id = f"backfill_rt_{int(time.time() * 1000)}"
