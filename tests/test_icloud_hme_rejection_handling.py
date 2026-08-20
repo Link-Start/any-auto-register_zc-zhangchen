@@ -1,16 +1,18 @@
-"""构建号过期导致的 "iCloud HME 拒绝了请求"。
+""""iCloud HME 拒绝了请求" 的可观测性与抖动重试。
 
-Apple 会校验 clientBuildNumber。探测失败时代码回退到 constants.py 里的内置常量，
-而那组常量会随 iCloud 发版过期（线上遇到过：内置 2626Build21，Apple 已经是
-2630Build35）。此时 Apple 只回一个不带原因的 success:false，用户看到的就是
-一句莫名其妙的"iCloud HME 拒绝了请求"，日志里也什么都没有。
+线上现象：刚做完两步验证后的头一两次生成隐私邮箱，Apple 偶发回一个不带原因的
+success:false（对外表现为 502），隔几分钟用同一份凭据就能成功。当时两端都没有
+日志，只剩一句"iCloud HME 拒绝了请求"，无从排查。
+
+这里覆盖两件事：把 Apple 的原始信封记进日志；对没有副作用的动作重试一次。
+另外构建号探测失败会静默降级到内置常量，同样需要日志（构建号本身经实测不是
+上述拒绝的原因，但降级无声无息迟早咬人）。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
@@ -23,8 +25,7 @@ from platforms.icloud.errors import ICloudError
 from platforms.icloud.transport import WebTransport
 from platforms.icloud.web_client import ICloudWebClient
 
-# 刻意和内置兜底常量不同：测的就是"兜底值被拒、换成探测值后成功"。
-GOOD_BUILD = "9999Build1"
+DISCOVERED_BUILD = "9999Build1"
 
 
 class _Adapter(BaseAdapter):
@@ -51,21 +52,17 @@ class _Adapter(BaseAdapter):
 
 
 class _StubCache(BuildInfoCache):
-    """先给兜底值，invalidate 之后给探测到的真值。"""
+    """不去抓 Apple 页面，只记录有没有被要求重新探测。"""
 
     def __init__(self):
         super().__init__()
-        self.discovered = False
         self.invalidated = 0
 
     def get(self, http, region):
-        if self.discovered:
-            return BuildInfo(cloud_build=GOOD_BUILD, cloud_mastering=GOOD_BUILD, discovered=True)
-        return BuildInfo()  # discovered=False，即内置常量
+        return BuildInfo()
 
     def invalidate(self, region):
         self.invalidated += 1
-        self.discovered = True
 
 
 def _credentials() -> ICloudCredentials:
@@ -90,46 +87,62 @@ def _client(handler, cache):
     return ICloudWebClient(WebTransport(session=session), cache), adapter
 
 
-def _build_number(request) -> str:
-    return parse_qs(urlparse(request.url).query).get("clientBuildNumber", [""])[0]
-
-
-def test_stale_build_number_is_retried_with_a_freshly_discovered_one():
+def test_transient_rejection_of_generate_is_retried_once():
+    """generate 只是让 Apple 提议地址，没有副作用，抖动时重试一次。"""
     cache = _StubCache()
+    attempts = {"n": 0}
 
-    def handler(request):
-        # Apple 只认新构建号，旧的一律 success:false 且不说原因
-        if _build_number(request) == GOOD_BUILD:
-            return 200, {"success": True, "result": {"hme": "ok.alias@icloud.com"}}
-        return 200, {"success": False}
+    def handler(_request):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 200, {"success": False}  # Apple 偶发拒绝，且不说原因
+        return 200, {"success": True, "result": {"hme": "ok.alias@icloud.com"}}
 
     client, adapter = _client(handler, cache)
     result = client._hme_request(_credentials(), "POST", "v1/hme/generate", {"langCode": "en-us"})
 
     assert result == {"hme": "ok.alias@icloud.com"}
-    assert cache.invalidated == 1, "拒绝后应该强制重新探测构建号"
-    assert [_build_number(r) for r in adapter.requests] == [FALLBACK_CLOUD_BUILD, GOOD_BUILD]
+    assert len(adapter.requests) == 2
+    assert cache.invalidated == 1, "重试时应顺带强制重新探测构建号"
 
 
-def test_rejection_with_fresh_build_number_is_not_retried():
-    """构建号本来就是探测到的，那拒绝就是真的拒绝，不该再重试一次。"""
+def test_reserve_is_never_retried():
+    """reserve 会真正占用地址，重试可能凭空多出一个隐私邮箱。"""
     cache = _StubCache()
-    cache.discovered = True
+    client, adapter = _client(lambda _r: (200, {"success": False}), cache)
 
+    with pytest.raises(ICloudError) as excinfo:
+        client._hme_request(_credentials(), "POST", "v1/hme/reserve", {"hme": "a@icloud.com"})
+
+    assert excinfo.value.code == "upstream_rejected"
+    assert len(adapter.requests) == 1
+    assert cache.invalidated == 0
+
+
+def test_delete_is_never_retried():
+    cache = _StubCache()
+    client, adapter = _client(lambda _r: (200, {"success": False}), cache)
+
+    with pytest.raises(ICloudError):
+        client._hme_request(_credentials(), "POST", "v1/hme/delete", {"anonymousId": "x"})
+
+    assert len(adapter.requests) == 1
+
+
+def test_persistent_rejection_still_surfaces_after_the_retry():
+    cache = _StubCache()
     client, adapter = _client(lambda _r: (200, {"success": False}), cache)
 
     with pytest.raises(ICloudError) as excinfo:
         client._hme_request(_credentials(), "POST", "v1/hme/generate", {})
 
     assert excinfo.value.code == "upstream_rejected"
-    assert cache.invalidated == 0
-    assert len(adapter.requests) == 1
+    assert len(adapter.requests) == 2, "重试一次之后就该把错误抛出去"
 
 
 def test_rejection_logs_apples_raw_envelope(caplog):
     """面向用户的文案是收敛过的，排查得靠日志里的原文。"""
     cache = _StubCache()
-    cache.discovered = True
     client, _ = _client(
         lambda _r: (200, {"success": False, "error": {"code": "ZONE_NOT_ENABLED"}}), cache
     )
@@ -158,8 +171,8 @@ def test_discovery_failure_is_logged_and_marked_as_fallback(caplog):
 
 def test_discovered_build_info_is_marked():
     html = (
-        '<html data-cw-private-build-number="9999Build1" '
-        'data-cw-private-mastering-number="9999Build1"></html>'
+        f'<html data-cw-private-build-number="{DISCOVERED_BUILD}" '
+        f'data-cw-private-mastering-number="{DISCOVERED_BUILD}"></html>'
     )
 
     class _Ok:
@@ -172,4 +185,4 @@ def test_discovered_build_info_is_marked():
     info = BuildInfoCache().get(_Ok(), "global")
 
     assert info.discovered is True
-    assert info.cloud_build == "9999Build1"
+    assert info.cloud_build == DISCOVERED_BUILD

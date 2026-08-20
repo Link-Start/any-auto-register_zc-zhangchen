@@ -45,6 +45,10 @@ from .utils import new_uuid, normalize_email_address
 
 logger = logging.getLogger(__name__)
 
+# 只有这两个动作对上游没有副作用：list 是纯读，generate 只是让 Apple 提议一个地址，
+# 真正占用地址的是随后的 reserve。其余动作重试可能造成重复注销/删除。
+_RETRIABLE_HME_ACTIONS = frozenset({"v2/hme/list", "v1/hme/generate"})
+
 
 class ICloudWebClient:
     def __init__(self, transport: WebTransport, build_cache: BuildInfoCache) -> None:
@@ -218,12 +222,13 @@ class ICloudWebClient:
         try:
             return self._hme_request_once(credentials, method, action, payload)
         except ICloudError as exc:
-            # 构建号探测失败时用的是内置常量，而常量会随 iCloud 发版过期，Apple 收到
-            # 过期构建号只会回一个不解释原因的 success:false。这种情况值得强制重新
-            # 探测后再试一次，否则用户看到的就是一个莫名其妙的“HME 拒绝了请求”。
-            if exc.code != "upstream_rejected" or not self._used_fallback_builds(credentials):
+            # 线上观察到：刚完成两步验证后的头一两次调用，Apple 偶发回一个不带原因的
+            # success:false，隔一会儿用同一份凭据就能成功。对没有副作用的动作重试一次
+            # 就能把这种抖动挡掉；reserve/delete 这类会改状态的绝不能重试。
+            if exc.code != "upstream_rejected" or action not in _RETRIABLE_HME_ACTIONS:
                 raise
-            logger.warning("iCloud HME 拒绝了请求且当前构建号是兜底值，重新探测后重试一次")
+            logger.warning("iCloud HME 拒绝了 %s，疑似上游抖动，重试一次", action)
+            # 顺带强制重新探测构建号：万一哪天真是构建号过期导致的，这一步能自愈。
             self._builds.invalidate(_builds_region(credentials))
             return self._hme_request_once(credentials, method, action, payload)
 
@@ -284,12 +289,6 @@ class ICloudWebClient:
             updated.mail_client_build_number = builds.mail_build
             updated.mail_client_mastering_number = builds.mail_mastering
         return updated
-
-    def _used_fallback_builds(self, credentials: ICloudCredentials) -> bool:
-        """当前这次请求用的构建号是探测来的，还是过期风险很高的内置常量？"""
-        if not is_official_service_url(credentials.hme_service_url):
-            return False
-        return not self._builds.get(self._transport, _builds_region(credentials)).discovered
 
     @staticmethod
     def _hme_endpoint(credentials: ICloudCredentials, action: str) -> str:
