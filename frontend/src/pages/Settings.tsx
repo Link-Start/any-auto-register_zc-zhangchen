@@ -17,6 +17,8 @@ import {
 } from '@ant-design/icons'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { ICLOUD_REGION_OPTIONS } from '@/lib/icloud'
+import { parseCountryIdList } from '@/lib/smsCountries'
+import SmsCountrySelect from '@/components/SmsCountrySelect'
 import MailImportPanel from '@/components/settings/MailImportPanel'
 import { apiFetch } from '@/lib/utils'
 
@@ -338,12 +340,13 @@ const TAB_ITEMS = [
         title: '国家选择',
         desc: 'OpenAI 自 2025 年起对多数国家改用 WhatsApp 验证，实测只有泰国（52）走纯短信稳定可用',
         fields: [
-          { key: 'sms_country', label: '默认国家 ID', placeholder: '52' },
+          { key: 'sms_country', label: '默认国家', type: 'country', placeholder: '默认泰国 (52)' },
           { key: 'sms_auto_country', label: '自动选最优国家', type: 'boolean' },
           {
             key: 'sms_allowed_countries',
             label: '允许的国家（可选）',
-            placeholder: '英文逗号分隔，例如 52,4,10；留空则全平台自由选',
+            type: 'country-multi',
+            placeholder: '留空则全平台自由选',
           },
           { key: 'sms_auto_min_stock', label: '自动选号最低库存', placeholder: '20' },
           { key: 'sms_auto_max_price', label: '自动选号价格上限', placeholder: '0 表示不限' },
@@ -418,7 +421,7 @@ interface FieldConfig {
   key: string
   label: string
   placeholder?: string
-  type?: 'select' | 'input' | 'boolean'
+  type?: 'select' | 'input' | 'boolean' | 'country' | 'country-multi'
   secret?: boolean
 }
 
@@ -536,6 +539,7 @@ function ConfigField({ field }: { field: FieldConfig }) {
   const [showSecret, setShowSecret] = useState(false)
   const options = SELECT_FIELDS[field.key]
   const isBooleanField = field.type === 'boolean'
+  const isCountryField = field.type === 'country' || field.type === 'country-multi'
   const helpText =
     field.key === 'default_executor'
       ? '仅对支持的平台生效；ChatGPT 支持浏览器模式，iCloud 仅支持纯协议。'
@@ -552,7 +556,12 @@ function ConfigField({ field }: { field: FieldConfig }) {
       extra={helpText}
       valuePropName={isBooleanField ? 'checked' : undefined}
     >
-      {options ? (
+      {isCountryField ? (
+        <SmsCountrySelect
+          multiple={field.type === 'country-multi'}
+          placeholder={field.placeholder}
+        />
+      ) : options ? (
         <Select options={options} style={{ width: '100%' }} />
       ) : isBooleanField ? (
         <Switch checkedChildren="开启" unCheckedChildren="关闭" />
@@ -1409,6 +1418,8 @@ export default function Settings() {
       for (const key of SMS_BOOLEAN_KEYS) {
         data[key] = parseBooleanConfigValue(data[key])
       }
+      // 库里存的是 "52,4,10"，下拉要的是数组
+      data.sms_allowed_countries = parseCountryIdList(data.sms_allowed_countries)
       if (!String(data.email_domain_level_count ?? '').trim()) {
         data.email_domain_level_count = 2
       }
@@ -1479,6 +1490,8 @@ export default function Settings() {
       for (const key of SMS_BOOLEAN_KEYS) {
         values[key] = parseBooleanConfigValue(values[key])
       }
+      const allowedCountries = parseCountryIdList(values.sms_allowed_countries)
+      values.sms_allowed_countries = allowedCountries.join(',')
       const rawDomainLevelCount = Number.parseInt(String(values.email_domain_level_count ?? '').trim(), 10)
       if (values.mail_provider === 'cfworker' && values.email_domain_rule_enabled) {
         if (!Number.isInteger(rawDomainLevelCount) || rawDomainLevelCount < 2) {
@@ -1505,6 +1518,7 @@ export default function Settings() {
         cfworker_random_name_subdomain: values.cfworker_random_name_subdomain,
         email_domain_rule_enabled: values.email_domain_rule_enabled,
         email_domain_level_count: values.email_domain_level_count,
+        sms_allowed_countries: allowedCountries,
         ...Object.fromEntries(SMS_BOOLEAN_KEYS.map((key) => [key, values[key]])),
       })
       message.success('保存成功')

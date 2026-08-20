@@ -20,6 +20,7 @@ import {
 } from '@ant-design/icons'
 import { listICloudAccounts, type ICloudAccount } from '@/api/icloud'
 import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
+import SmsCountrySelect from '@/components/SmsCountrySelect'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
@@ -607,8 +608,8 @@ export default function RegisterTaskPage() {
               仅在注册链路进入 add-phone 时使用：自动租号、等短信、验证，全程无人值守。
               平台与 API Key 在「设置 → 手机接码」里配置，这里只覆盖本次任务的参数。
             </Text>
-            <Form.Item name="sms_country" label="国家 ID（可选）">
-              <Input placeholder="52（泰国，OpenAI 纯短信白名单）" />
+            <Form.Item name="sms_country" label="国家（可选）">
+              <SmsCountrySelect placeholder="留空用设置里的默认国家" />
             </Form.Item>
             <Form.Item name="sms_per_phone_timeout" label="单号等待秒数（可选）">
               <Input placeholder="80" />

@@ -32,6 +32,19 @@ def test_provider_list_exposes_labels_and_defaults(client):
     assert body["openai_sms_countries"] == ["52"]
 
 
+def test_country_options_carry_chinese_names(client):
+    body = client.get("/api/sms/country-options").json()
+
+    by_value = {item["value"]: item for item in body["items"]}
+    assert by_value["52"]["name"] == "泰国"
+    # 标签里保留 ID，下拉既能按中文搜也能按数字搜
+    assert by_value["52"]["label"] == "泰国 (52)"
+    assert by_value["52"]["openai_sms_whitelisted"] is True
+    assert by_value["12"]["openai_sms_whitelisted"] is False
+    assert body["default_country"] == "52"
+    assert len(body["items"]) > 100
+
+
 def test_balance_probe_uses_request_credentials(client):
     provider = mock.Mock()
     provider.get_balance.return_value = 12.5

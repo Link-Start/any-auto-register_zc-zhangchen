@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.sms_service import (
+    SMS_DEFAULT_COUNTRY,
     SMS_DEFAULT_SERVICE,
     SMS_PROVIDERS,
     OPENAI_SMS_COUNTRIES,
@@ -55,6 +56,27 @@ def list_sms_providers():
         ],
         "default_service": SMS_DEFAULT_SERVICE,
         "openai_sms_countries": sorted(OPENAI_SMS_COUNTRIES),
+    }
+
+
+@router.get("/country-options")
+def list_sms_country_options():
+    """设置页国家下拉的选项：平台的国家 ID 配中文名。
+
+    平台接口只认数字 ID，让人对着 ``52`` 猜是哪个国家没有意义；标签里同时保留
+    ID，既能按中文搜也能按数字搜。
+    """
+    return {
+        "items": [
+            {
+                "value": country_id,
+                "name": name,
+                "label": f"{name} ({country_id})",
+                "openai_sms_whitelisted": country_id in OPENAI_SMS_COUNTRIES,
+            }
+            for country_id, name in SMS_COUNTRY_NAMES_CN.items()
+        ],
+        "default_country": SMS_DEFAULT_COUNTRY,
     }
 
 
