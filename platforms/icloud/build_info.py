@@ -6,6 +6,7 @@ Apple Web 服务会校验请求里的 clientBuildNumber / clientMasteringNumber�
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -22,9 +23,12 @@ from .constants import (
     normalize_region,
 )
 
+logger = logging.getLogger(__name__)
+
 CACHE_TTL_SECONDS = 300
 MAX_PAGE_BYTES = 1 << 20
 MAIL_BUILD_PAGE_PATH = "/applications/mail2/current/en-us/index.html?rootDomain=www"
+FETCH_ATTEMPTS = 2
 
 _BUILD_ATTR = "data-cw-private-build-number"
 _MASTERING_ATTR = "data-cw-private-mastering-number"
@@ -36,6 +40,9 @@ class BuildInfo:
     cloud_mastering: str = FALLBACK_CLOUD_MASTERING
     mail_build: str = FALLBACK_MAIL_BUILD
     mail_mastering: str = FALLBACK_MAIL_MASTERING
+    # 内置常量会随 iCloud 发版过期，Apple 收到过期构建号会直接拒绝请求。调用方
+    # 靠这个标记判断手里的号是真探测到的，还是兜底值。
+    discovered: bool = False
 
 
 class _AppBuildParser(HTMLParser):
@@ -95,7 +102,25 @@ class BuildInfoCache:
 
         with self._lock:
             cached = self._entries.get(region)
-        return cached[0] if cached else BuildInfo()
+        if cached:
+            logger.warning(
+                "iCloud[%s] 构建号探测失败，继续用已过期的缓存值 %s", region, cached[0].cloud_build
+            )
+            return cached[0]
+        # 兜底常量迟早会过期，一旦走到这里 Apple 大概率会拒绝后续请求，
+        # 而且它的拒绝信息里不会说是构建号的问题，所以必须自己喊出来。
+        logger.warning(
+            "iCloud[%s] 构建号探测失败且无缓存，回退到内置常量 %s；"
+            "Apple 可能因构建号过期拒绝请求（表现为“iCloud HME 拒绝了请求”）",
+            region,
+            FALLBACK_CLOUD_BUILD,
+        )
+        return BuildInfo()
+
+    def invalidate(self, region: str | None) -> None:
+        """丢掉缓存，强制下次重新探测。"""
+        with self._lock:
+            self._entries.pop(normalize_region(region), None)
 
     def _discover(self, http, region: str) -> Optional[BuildInfo]:
         origin = endpoints_for(region).origin
@@ -108,14 +133,19 @@ class BuildInfoCache:
             cloud_mastering=cloud[1],
             mail_build=mail[0],
             mail_mastering=mail[1],
+            discovered=True,
         )
 
     @staticmethod
     def _fetch(http, url: str) -> Optional[tuple[str, str]]:
-        try:
-            response = http.get(url, headers={"Accept": "text/html,application/xhtml+xml"})
-            if not response.ok:
-                return None
-            return parse_app_build(response.text[:MAX_PAGE_BYTES])
-        except Exception:
-            return None
+        # 跨境访问 Apple 的页面偶发超时，一次失败就退回过期常量代价太大，重试一次。
+        for attempt in range(FETCH_ATTEMPTS):
+            try:
+                response = http.get(url, headers={"Accept": "text/html,application/xhtml+xml"})
+                if not response.ok:
+                    logger.debug("构建号页面 %s 返回 HTTP %s", url, response.status_code)
+                    continue
+                return parse_app_build(response.text[:MAX_PAGE_BYTES])
+            except Exception as exc:
+                logger.debug("构建号页面 %s 第 %s 次抓取失败: %s", url, attempt + 1, exc)
+        return None

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 from urllib.parse import urlencode, urlparse, urlunparse
@@ -41,6 +42,8 @@ from .transport import (
     web_headers,
 )
 from .utils import new_uuid, normalize_email_address
+
+logger = logging.getLogger(__name__)
 
 
 class ICloudWebClient:
@@ -212,6 +215,25 @@ class ICloudWebClient:
         action: str,
         payload: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
+        try:
+            return self._hme_request_once(credentials, method, action, payload)
+        except ICloudError as exc:
+            # 构建号探测失败时用的是内置常量，而常量会随 iCloud 发版过期，Apple 收到
+            # 过期构建号只会回一个不解释原因的 success:false。这种情况值得强制重新
+            # 探测后再试一次，否则用户看到的就是一个莫名其妙的“HME 拒绝了请求”。
+            if exc.code != "upstream_rejected" or not self._used_fallback_builds(credentials):
+                raise
+            logger.warning("iCloud HME 拒绝了请求且当前构建号是兜底值，重新探测后重试一次")
+            self._builds.invalidate(_builds_region(credentials))
+            return self._hme_request_once(credentials, method, action, payload)
+
+    def _hme_request_once(
+        self,
+        credentials: ICloudCredentials,
+        method: str,
+        action: str,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
         credentials = self._with_current_builds(credentials)
         _require_hme_credentials(credentials)
         url = self._hme_endpoint(credentials, action)
@@ -238,6 +260,9 @@ class ICloudWebClient:
 
         envelope = _decode_json(response, "iCloud HME")
         if envelope.get("success") is False:
+            # 面向用户的文案会刻意收敛（比如限流不回显上游原文），但排查时需要原文，
+            # 否则只剩一句“HME 拒绝了请求”，完全无从下手。
+            logger.error("iCloud HME 拒绝了 %s，原始响应: %s", action, json.dumps(envelope)[:600])
             raise envelope_error(envelope, "iCloud HME 拒绝了请求")
         result = envelope.get("result")
         return result if isinstance(result, dict) else envelope
@@ -249,11 +274,7 @@ class ICloudWebClient:
         if not hme_official and not mail_official:
             return credentials
 
-        region = credentials.region
-        if not str(region or "").strip():
-            urls = f"{credentials.hme_service_url}{credentials.mail_gateway_url}".lower()
-            region = "china" if "icloud.com.cn" in urls else ""
-        builds = self._builds.get(self._transport, region)
+        builds = self._builds.get(self._transport, _builds_region(credentials))
 
         updated = ICloudCredentials.from_dict(credentials.to_dict())
         if hme_official:
@@ -263,6 +284,12 @@ class ICloudWebClient:
             updated.mail_client_build_number = builds.mail_build
             updated.mail_client_mastering_number = builds.mail_mastering
         return updated
+
+    def _used_fallback_builds(self, credentials: ICloudCredentials) -> bool:
+        """当前这次请求用的构建号是探测来的，还是过期风险很高的内置常量？"""
+        if not is_official_service_url(credentials.hme_service_url):
+            return False
+        return not self._builds.get(self._transport, _builds_region(credentials)).discovered
 
     @staticmethod
     def _hme_endpoint(credentials: ICloudCredentials, action: str) -> str:
@@ -279,6 +306,15 @@ class ICloudWebClient:
         if credentials.ckjs_build_version:
             query["ckjsBuildVersion"] = credentials.ckjs_build_version
         return urlunparse(base._replace(path=path, query=urlencode(sorted(query.items()))))
+
+
+def _builds_region(credentials: ICloudCredentials) -> str:
+    """凭据没写区域时，从服务地址推断，用于挑对构建号来源站点。"""
+    region = credentials.region
+    if str(region or "").strip():
+        return region
+    urls = f"{credentials.hme_service_url}{credentials.mail_gateway_url}".lower()
+    return "china" if "icloud.com.cn" in urls else ""
 
 
 def _require_hme_credentials(credentials: ICloudCredentials) -> None:

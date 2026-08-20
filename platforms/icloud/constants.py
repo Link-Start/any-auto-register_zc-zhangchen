@@ -13,11 +13,14 @@ USER_AGENT = (
 )
 OAUTH_CLIENT_ID = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
 
-# Apple 页面探测失败时使用的兜底构建号。
-FALLBACK_CLOUD_BUILD = "2626Build21"
-FALLBACK_CLOUD_MASTERING = "2626Build21"
-FALLBACK_MAIL_BUILD = "2626Hotfix82"
-FALLBACK_MAIL_MASTERING = "2626Hotfix82"
+# Apple 页面探测失败时使用的兜底构建号。这组值会随 iCloud 发版过期，过期后 Apple 会
+# 直接拒绝请求且不说明原因，所以探测失败时会打警告日志并强制重新探测一次（见
+# build_info.py）。若日志里频繁出现构建号告警，从 www.icloud.com 页面的
+# data-cw-private-build-number 属性取新值更新这里。
+FALLBACK_CLOUD_BUILD = "2630Build35"
+FALLBACK_CLOUD_MASTERING = "2630Build35"
+FALLBACK_MAIL_BUILD = "2630Hotfix39"
+FALLBACK_MAIL_MASTERING = "2630Hotfix39"
 
 DEFAULT_IMAP_HOST = "imap.mail.me.com"
 DEFAULT_IMAP_PORT = 993

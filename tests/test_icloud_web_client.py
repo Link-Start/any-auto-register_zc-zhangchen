@@ -8,6 +8,7 @@ import requests
 from requests.adapters import BaseAdapter
 
 from platforms.icloud.build_info import BuildInfo, BuildInfoCache, parse_app_build
+from platforms.icloud.constants import FALLBACK_CLOUD_BUILD
 from platforms.icloud.credentials import ICloudCredentials
 from platforms.icloud.errors import ICloudError
 from platforms.icloud.models import SessionImportRequest
@@ -89,7 +90,7 @@ def test_hme_endpoint_carries_dsid_and_build_numbers():
     query = parse_qs(parsed.query)
     assert parsed.path == "/v1/hme/v2/hme/list"
     assert query["dsid"] == ["123456"]
-    assert query["clientBuildNumber"] == ["2626Build21"]
+    assert query["clientBuildNumber"] == [FALLBACK_CLOUD_BUILD]
     assert adapter.requests[0].headers["Cookie"] == (
         'session="value"; X-APPLE-WEBAUTH-USER="v=1%3As=1%3Ad=123456"'
     )
