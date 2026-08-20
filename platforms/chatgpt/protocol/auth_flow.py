@@ -1129,7 +1129,25 @@ class AuthFlow:
             sl = (s or "").lower()
             return any(p in sl for p in _PHONE_REJECTED_PATTERNS)
 
+        # OpenAI 侧流程状态已经不在 add-phone 上了（前一个号窗口耗尽、authorize 被
+        # 重置等）。这类错和号码无关：接着换号只会一秒一个地重复同样的报错，把钱
+        # 烧在租号上。交回上层重走 authorize 才有意义。
+        _FLOW_STATE_PATTERNS = (
+            "invalid authorization step",
+            "invalid_authorization_step",
+            "invalid state",
+            "invalid_state",
+        )
+
+        def _is_flow_state_error(s: str) -> bool:
+            sl = (s or "").lower()
+            return any(p in sl for p in _FLOW_STATE_PATTERNS)
+
         last_err: Optional[Exception] = None
+        # 同一句未识别错误连着来，说明问题不在号上（OpenAI 侧状态、风控、参数都可能），
+        # 再换号也只是按秒烧租号额度。连续 3 次就收手。
+        repeated_err = ""
+        repeated_count = 0
 
         for phone_attempt in range(1, max_phone_attempts + 1):
             logger.info("[sms] 🔁 第 %d/%d 个号尝试...", phone_attempt, max_phone_attempts)
@@ -1168,11 +1186,32 @@ class AuthFlow:
                     ctrl.mark_send_failed(err_text)
                     last_err = e
                     continue
+                if _is_flow_state_error(err_text):
+                    logger.warning(
+                        "[sms] add-phone 步骤已失效（%s）：这不是号码问题，"
+                        "继续换号只会一秒一个地重复同样的错，本轮到此为止，"
+                        "交回上层重走 authorize",
+                        err_text[:200],
+                    )
+                    ctrl.mark_send_failed(err_text)
+                    last_err = e
+                    break
                 # 其它未识别错误 → 也打详细日志但不视为"号码问题"
                 logger.warning("[sms] 号 %s POST add-phone/send 失败（未识别错误）: %s",
                                phone, err_text[:300])
                 ctrl.mark_send_failed(err_text)
                 last_err = e
+                if err_text[:300] == repeated_err:
+                    repeated_count += 1
+                else:
+                    repeated_err = err_text[:300]
+                    repeated_count = 1
+                if repeated_count >= 3:
+                    logger.warning(
+                        "[sms] 同一个错误连续 %d 个号了（%s），判定与号码无关，本轮停止换号",
+                        repeated_count, err_text[:200],
+                    )
+                    break
                 continue
 
             send_page_type = self._extract_page_type(send_resp)
@@ -1189,6 +1228,8 @@ class AuthFlow:
                 continue
 
             ctrl.mark_send_succeeded()
+            repeated_err = ""
+            repeated_count = 0
 
             # 阶段 3：等 SMS code（SmsBower 内部会按 20s × 3 调 OpenAI resend）
             phone_start = time.time()
