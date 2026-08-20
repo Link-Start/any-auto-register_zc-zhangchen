@@ -168,6 +168,22 @@ class BackfillTaskEndpointTests(unittest.TestCase):
         self.assertEqual(account.token, "at-new")
         self.assertTrue(extra["chatgpt_rt_backfill"]["ok"])
 
+    def test_runner_hands_its_stop_switch_to_the_engine(self):
+        """等验证码那几分钟归邮箱管，拿不到 control 就停不下来。"""
+        from platforms.chatgpt.rt_backfill import BackfillResult
+
+        result = BackfillResult(success=False, email="no-rt-1@example.com", error_message="x")
+
+        with mock.patch(
+            "services.chatgpt_rt_backfill.backfill_account_data", return_value=result
+        ) as engine_call:
+            self.client.post("/tasks/backfill-rt", json={"all_filtered": True, "delay_seconds": 0})
+
+        kwargs = engine_call.call_args.kwargs
+        self.assertIsNotNone(kwargs["task_control"])
+        self.assertTrue(hasattr(kwargs["task_control"], "checkpoint"))
+        self.assertIsNotNone(kwargs["attempt_id"])
+
     def test_runner_records_failure_without_touching_credentials(self):
         from platforms.chatgpt.rt_backfill import STRATEGY_LOGIN, BackfillAttempt, BackfillResult
 
