@@ -33,6 +33,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
     APP_RELOAD=0 \
     APP_RUNTIME_DIR=/runtime \
+    CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/.secrets/credential_key \
     APP_ENABLE_SOLVER=0
 
 WORKDIR /app

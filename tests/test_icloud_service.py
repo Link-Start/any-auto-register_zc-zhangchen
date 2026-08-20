@@ -110,6 +110,27 @@ def test_reimport_keeps_existing_imap_password_when_not_resubmitted(service, stu
     assert credentials.imap_password == "app-specific"
 
 
+def test_unreadable_credentials_report_a_relogin_hint(service, stub_web_client, monkeypatch):
+    """密钥换掉后旧密文解不开，要给出"重新登录"而不是裸的 InvalidTag。"""
+    stub_web_client["client"] = _StubWebClient(imported=_imported())
+    account = service.import_session(SessionImportRequest(cookie_header="a=1"))
+
+    import core.secret_box as secret_box_module
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setattr(service, "secret_box", secret_box_module.SecretBox())
+
+    row = service.get_account(account["id"])
+    with pytest.raises(ICloudError) as excinfo:
+        service.load_credentials(row)
+
+    assert excinfo.value.code == "credentials_unreadable"
+    assert "重新登录" in str(excinfo.value)
+
+    # 账号列表不能因此整个 500，要能标出这一条坏掉了
+    assert service.list_accounts()[0]["credential_state"] == {"credentials_unreadable": True}
+
+
 def test_generate_alias_enforces_hourly_quota(service, stub_web_client):
     stub_web_client["client"] = _StubWebClient(imported=_imported())
     account = service.import_session(SessionImportRequest(cookie_header="a=1"))

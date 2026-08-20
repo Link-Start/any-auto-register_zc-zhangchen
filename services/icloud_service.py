@@ -56,7 +56,17 @@ def _account_lock(account_id: int) -> threading.Lock:
 
 
 def load_credentials(row: ICloudAccountModel) -> ICloudCredentials:
-    return ICloudCredentials.from_dict(secret_box.decrypt_json(row.credentials_cipher))
+    try:
+        payload = secret_box.decrypt_json(row.credentials_cipher)
+    except Exception as exc:
+        # 密文本身没坏，是解密密钥换了（最常见的原因是密钥没放在挂载卷里，
+        # 重建容器时被重新生成）。抛原始的 InvalidTag 只会得到一个 500，
+        # 用户看不出该怎么办——只能重新登录主号。
+        raise ICloudError(
+            "credentials_unreadable",
+            f"iCloud 主号 {row.email} 的凭据无法解密（加密密钥已变更），请重新登录该主号",
+        ) from exc
+    return ICloudCredentials.from_dict(payload)
 
 
 def get_account(account_id: int) -> ICloudAccountModel:

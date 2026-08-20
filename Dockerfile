@@ -24,6 +24,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_CONDA_ENV=docker \
     APP_RELOAD=0 \
     APP_RUNTIME_DIR=/runtime \
+    CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/.secrets/credential_key \
     APP_ENABLE_SOLVER=1 \
     SOLVER_PORT=8889 \
     SOLVER_BIND_HOST=0.0.0.0 \

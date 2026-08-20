@@ -34,6 +34,7 @@ _ERROR_STATUS = {
     "invalid_verification_code": 400,
     "invalid_credentials": 401,
     "session_expired": 401,
+    "credentials_unreadable": 409,
     "mail_access_denied": 403,
     "provider_rate_limited": 429,
     "upstream_rejected": 502,
