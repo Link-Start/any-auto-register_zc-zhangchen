@@ -77,9 +77,14 @@ def _apply_action_result(
             acc_model.updated_at = datetime.now(timezone.utc)
             session.add(acc_model)
     if isinstance(result.get("account_extra_patch"), dict):
+        patch = result["account_extra_patch"]
         extra = acc_model.get_extra()
-        _merge_extra_patch(extra, result["account_extra_patch"])
+        _merge_extra_patch(extra, patch)
         acc_model.set_extra(extra)
+        # 补 RT 顺带刷新的 access_token 只在补丁里，不走下面的 data 通道
+        # （补丁字段直接落 extra，不能拿去当展示文案），这里单独同步一次
+        if str(patch.get("access_token") or "").strip():
+            acc_model.token = patch["access_token"]
         from datetime import datetime, timezone
         acc_model.updated_at = datetime.now(timezone.utc)
         session.add(acc_model)

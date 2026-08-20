@@ -45,6 +45,24 @@ class TaskLogBatchDeleteRequest(BaseModel):
     ids: list[int]
 
 
+class BackfillRtTaskRequest(BaseModel):
+    """批量补 RT 的任务参数。
+
+    默认串行 + 每个号之间隔几秒：补 RT 会对同一批号连续打 OpenAI 的授权链，
+    并发拉满等于主动送风控素材，宁可慢点。
+    """
+
+    account_ids: list[int] = Field(default_factory=list)
+    all_filtered: bool = False
+    email: str = ""
+    status: str = ""
+    only_missing_rt: bool = True
+    allow_login: bool = True
+    concurrency: int = 1
+    delay_seconds: float = 5
+    proxy: Optional[str] = None
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -640,6 +658,221 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
     )
     _persist_task_snapshot(task_id)
     _task_store.cleanup()
+
+
+def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRequest):
+    """批量补 RT。逐号跑，可停可跳，进度和日志复用注册任务那套。"""
+    from core.config_store import config_store
+    from core.db import AccountModel
+    from core.proxy_pool import proxy_pool
+    from core.proxy_utils import normalize_proxy_url
+    from services.chatgpt_rt_backfill import apply_backfill_result, backfill_account
+
+    control = _task_store.control_for(task_id)
+    _task_store.mark_running(task_id)
+    _persist_task_snapshot(task_id)
+
+    total = len(account_ids)
+    success = 0
+    skipped = 0
+    errors: list[str] = []
+    stopped = False
+    start_gate = threading.Lock()
+    next_start_time = time.time()
+    base_config = config_store.get_all() or {}
+
+    def _resolve_proxy() -> Optional[str]:
+        if req.proxy:
+            return normalize_proxy_url(req.proxy)
+        return normalize_proxy_url(proxy_pool.get_next())
+
+    def _wait_turn(attempt_id: int | None) -> None:
+        nonlocal next_start_time
+        if req.delay_seconds <= 0:
+            return
+        with start_gate:
+            control.checkpoint(attempt_id=attempt_id)
+            wait_seconds = max(0.0, next_start_time - time.time())
+            remaining = wait_seconds
+            while remaining > 0:
+                control.checkpoint(attempt_id=attempt_id)
+                chunk = min(0.25, remaining)
+                time.sleep(chunk)
+                remaining -= chunk
+            next_start_time = time.time() + req.delay_seconds
+
+    def _do_one(index: int, account_id: int) -> AttemptResult:
+        attempt_id: int | None = None
+        email = ""
+        try:
+            control.checkpoint()
+            attempt_id = control.start_attempt()
+            _wait_turn(attempt_id)
+            control.checkpoint(attempt_id=attempt_id)
+
+            proxy = _resolve_proxy()
+            with Session(engine) as s:
+                account = s.get(AccountModel, account_id)
+                if account is None or account.platform != "chatgpt":
+                    _log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                    return AttemptResult.skipped("账号不存在")
+
+                email = account.email
+                _task_store.set_progress(task_id, f"{index + 1}/{total}")
+                _log(task_id, f"开始补 RT {index + 1}/{total}: {email}")
+                if proxy:
+                    _log(task_id, f"使用代理: {proxy}")
+
+                result = backfill_account(
+                    account,
+                    config=base_config,
+                    proxy=proxy,
+                    allow_login=req.allow_login,
+                    log_fn=lambda msg: _log(task_id, f"  {msg}"),
+                )
+                apply_backfill_result(account, result, session=s, commit=True)
+
+            if result.success:
+                if proxy:
+                    proxy_pool.report_success(proxy)
+                _log(task_id, f"[OK] {email} {result.summary()}")
+                _save_task_log("chatgpt", email, "success", detail={"action": "backfill_rt"})
+                return AttemptResult.success()
+
+            if proxy:
+                proxy_pool.report_fail(proxy)
+            _log(task_id, f"[FAIL] {email} {result.summary()}")
+            _save_task_log(
+                "chatgpt",
+                email,
+                "failed",
+                error=result.summary(),
+                detail={"action": "backfill_rt"},
+            )
+            return AttemptResult.failed(f"{email}: {result.summary()}")
+        except SkipCurrentAttemptRequested as e:
+            _log(task_id, f"[SKIP] 已跳过当前账号: {e}")
+            return AttemptResult.skipped(str(e))
+        except StopTaskRequested as e:
+            _log(task_id, f"[STOP] {e}")
+            return AttemptResult.stopped(str(e))
+        except Exception as e:
+            _log(task_id, f"[FAIL] {email or f'#{account_id}'} 补 RT 异常: {e}")
+            return AttemptResult.failed(str(e))
+        finally:
+            control.finish_attempt(attempt_id)
+
+    try:
+        from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+
+        max_workers = max(1, min(int(req.concurrency or 1), max(total, 1)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(_do_one, index, account_id)
+                for index, account_id in enumerate(account_ids)
+            ]
+            for f in as_completed(futures):
+                try:
+                    result = f.result()
+                except CancelledError:
+                    continue
+                except Exception as e:
+                    _log(task_id, f"[ERROR] 任务线程异常: {e}")
+                    errors.append(str(e))
+                    continue
+                if result.outcome == AttemptOutcome.SUCCESS:
+                    success += 1
+                elif result.outcome == AttemptOutcome.SKIPPED:
+                    skipped += 1
+                elif result.outcome == AttemptOutcome.STOPPED:
+                    stopped = True
+                else:
+                    errors.append(result.message)
+                _task_store.update_counters(
+                    task_id,
+                    success=success,
+                    registered=success + skipped + len(errors),
+                )
+                _persist_task_snapshot(task_id)
+                if stopped or control.is_stop_requested():
+                    stopped = True
+                    for pending in futures:
+                        if pending is not f:
+                            pending.cancel()
+    except Exception as e:
+        _log(task_id, f"致命错误: {e}")
+        _task_store.finish(
+            task_id,
+            status="failed",
+            success=success,
+            registered=success + skipped + len(errors),
+            skipped=skipped,
+            errors=errors,
+            error=str(e),
+        )
+        _persist_task_snapshot(task_id)
+        _task_store.cleanup()
+        return
+
+    final_status = "stopped" if control.is_stop_requested() or stopped else "done"
+    prefix = "补 RT 已停止" if final_status == "stopped" else "补 RT 完成"
+    _log(task_id, f"{prefix}: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个")
+    _task_store.finish(
+        task_id,
+        status=final_status,
+        success=success,
+        registered=success + skipped + len(errors),
+        skipped=skipped,
+        errors=errors,
+    )
+    _persist_task_snapshot(task_id)
+    _task_store.cleanup()
+
+
+@router.post("/backfill-rt")
+def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: BackgroundTasks):
+    """批量给缺 refresh_token 的 ChatGPT 账号补 RT。"""
+    from services.chatgpt_rt_backfill import select_backfill_targets
+
+    with Session(engine) as s:
+        try:
+            accounts, missing_ids = select_backfill_targets(
+                s,
+                account_ids=req.account_ids,
+                all_filtered=req.all_filtered,
+                email=req.email,
+                status=req.status,
+                only_missing_rt=req.only_missing_rt,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        account_ids = [int(row.id) for row in accounts if row.id]
+
+    if not account_ids:
+        detail = "所选账号都已经有 RT 了" if req.only_missing_rt else "没有匹配的账号"
+        raise HTTPException(400, detail)
+
+    task_id = f"backfill_rt_{int(time.time() * 1000)}"
+    _task_store.create(
+        task_id,
+        platform="chatgpt",
+        total=len(account_ids),
+        source="backfill_rt",
+        meta={
+            "kind": "backfill_rt",
+            "only_missing_rt": req.only_missing_rt,
+            "allow_login": req.allow_login,
+            "concurrency": req.concurrency,
+            "delay_seconds": req.delay_seconds,
+            "missing_ids": missing_ids,
+        },
+    )
+    _persist_task_snapshot(task_id)
+    _log(task_id, f"待补 RT 账号 {len(account_ids)} 个")
+    if missing_ids:
+        _log(task_id, f"忽略不存在的账号: {missing_ids}")
+    background_tasks.add_task(_run_backfill_rt, task_id, account_ids, req)
+    return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
 
 
 @router.post("/register")

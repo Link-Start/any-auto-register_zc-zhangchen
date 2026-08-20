@@ -75,6 +75,7 @@ class ChatGPTPlatform(BasePlatform):
             {"id": "probe_local_status", "label": "探测本地状态", "params": []},
             {"id": "sync_cliproxyapi_status", "label": "同步 CLIProxyAPI 状态", "params": []},
             {"id": "refresh_token", "label": "刷新 Token", "params": []},
+            {"id": "backfill_refresh_token", "label": "补 RT", "params": []},
             {
                 "id": "payment_link",
                 "label": "生成支付链接",
@@ -191,6 +192,26 @@ class ChatGPTPlatform(BasePlatform):
                     },
                 }
             return {"ok": False, "error": result.error_message}
+
+        if action_id == "backfill_refresh_token":
+            from services.chatgpt_rt_backfill import backfill_account_data, build_extra_patch
+
+            result = backfill_account_data(
+                email=account.email,
+                password=account.password,
+                extra=extra,
+                token=account.token,
+                config=(self.config.extra or {}) if self.config else {},
+                proxy=proxy,
+                allow_login=str(params.get("allow_login", "1")).lower() not in ("0", "false", "no"),
+                log_fn=getattr(self, "_log_fn", None),
+            )
+            return {
+                "ok": result.success,
+                "data": {"message": result.summary(), "strategy": result.strategy},
+                "error": "" if result.success else result.summary(),
+                "account_extra_patch": build_extra_patch(result),
+            }
 
         if action_id == "payment_link":
             from platforms.chatgpt.payment import generate_plus_link, generate_team_link

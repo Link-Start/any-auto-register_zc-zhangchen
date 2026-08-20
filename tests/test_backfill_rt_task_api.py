@@ -1,0 +1,127 @@
+"""批量补 RT 任务：选号规则与任务创建接口。"""
+
+import unittest
+from unittest import mock
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlmodel import Session, delete, select
+
+from core.db import AccountModel, engine
+from services.chatgpt_rt_backfill import select_backfill_targets
+
+
+def _account(email, *, extra=None, status="registered", platform="chatgpt"):
+    model = AccountModel(platform=platform, email=email, password="pw", status=status)
+    model.set_extra(extra or {})
+    return model
+
+
+class BackfillTargetSelectionTests(unittest.TestCase):
+    def setUp(self):
+        with Session(engine) as session:
+            session.exec(delete(AccountModel))
+            session.add_all(
+                [
+                    _account("no-rt-1@example.com"),
+                    _account("no-rt-2@example.com", status="trial"),
+                    _account("has-rt@example.com", extra={"refresh_token": "rt"}),
+                    _account("other-platform@example.com", platform="cursor"),
+                ]
+            )
+            session.commit()
+
+    def test_all_filtered_keeps_only_accounts_without_rt(self):
+        with Session(engine) as session:
+            accounts, missing = select_backfill_targets(session, all_filtered=True)
+
+        self.assertEqual(
+            sorted(row.email for row in accounts),
+            ["no-rt-1@example.com", "no-rt-2@example.com"],
+        )
+        self.assertEqual(missing, [])
+
+    def test_status_and_email_filters_are_applied(self):
+        with Session(engine) as session:
+            accounts, _ = select_backfill_targets(session, all_filtered=True, status="trial")
+            self.assertEqual([row.email for row in accounts], ["no-rt-2@example.com"])
+
+            accounts, _ = select_backfill_targets(session, all_filtered=True, email="no-rt-1")
+            self.assertEqual([row.email for row in accounts], ["no-rt-1@example.com"])
+
+    def test_only_missing_rt_off_includes_accounts_that_already_have_one(self):
+        with Session(engine) as session:
+            accounts, _ = select_backfill_targets(
+                session, all_filtered=True, only_missing_rt=False
+            )
+
+        self.assertIn("has-rt@example.com", [row.email for row in accounts])
+
+    def test_explicit_ids_report_missing_rows(self):
+        with Session(engine) as session:
+            existing = session.exec(
+                select(AccountModel).where(AccountModel.email == "no-rt-1@example.com")
+            ).first()
+            accounts, missing = select_backfill_targets(
+                session, account_ids=[existing.id, 999999]
+            )
+
+        self.assertEqual([row.email for row in accounts], ["no-rt-1@example.com"])
+        self.assertEqual(missing, [999999])
+
+    def test_no_scope_is_rejected(self):
+        with Session(engine) as session:
+            with self.assertRaises(ValueError):
+                select_backfill_targets(session)
+
+
+class BackfillTaskEndpointTests(unittest.TestCase):
+    def setUp(self):
+        from api.tasks import router
+
+        with Session(engine) as session:
+            session.exec(delete(AccountModel))
+            session.add_all(
+                [
+                    _account("no-rt-1@example.com"),
+                    _account("has-rt@example.com", extra={"refresh_token": "rt"}),
+                ]
+            )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(router)
+        self.client = TestClient(app)
+
+    def test_creates_task_for_accounts_missing_rt(self):
+        with mock.patch("api.tasks._run_backfill_rt") as runner:
+            response = self.client.post("/tasks/backfill-rt", json={"all_filtered": True})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["total"], 1)
+        self.assertTrue(body["task_id"].startswith("backfill_rt_"))
+        runner.assert_called_once()
+        _task_id, account_ids, req = runner.call_args.args
+        self.assertEqual(len(account_ids), 1)
+        self.assertTrue(req.only_missing_rt)
+
+    def test_rejects_when_every_account_already_has_rt(self):
+        with mock.patch("api.tasks._run_backfill_rt") as runner:
+            response = self.client.post(
+                "/tasks/backfill-rt", json={"all_filtered": True, "email": "has-rt"}
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("已经有 RT", response.json()["detail"])
+        runner.assert_not_called()
+
+    def test_rejects_request_without_scope(self):
+        response = self.client.post("/tasks/backfill-rt", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("all_filtered", response.json()["detail"])
+
+
+if __name__ == "__main__":
+    unittest.main()
