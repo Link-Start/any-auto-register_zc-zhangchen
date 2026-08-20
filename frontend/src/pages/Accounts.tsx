@@ -371,6 +371,8 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
   const [resultProbe, setResultProbe] = useState<any>(null)
   const [resultCliproxySync, setResultCliproxySync] = useState<any>(null)
   const [runningActionId, setRunningActionId] = useState<string | null>(null)
+  const [taskModalTitle, setTaskModalTitle] = useState('')
+  const [actionTaskId, setActionTaskId] = useState<string | null>(null)
 
   const showResult = (title: string, status: 'success' | 'error', text: string, url = '', probe: any = null, cliproxySync: any = null) => {
     setResultTitle(title)
@@ -392,10 +394,35 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
     }
   }
 
+  // 补 RT 要跑几十秒的授权链，同步等只能看见一个转圈。改走后台任务，
+  // 和注册一样用日志弹窗把每一步显示出来。
+  const runAsTask = async (actionLabel: string) => {
+    setRunningActionId('backfill_refresh_token')
+    try {
+      const result = await apiFetch('/tasks/backfill-rt', {
+        method: 'POST',
+        body: JSON.stringify({ account_ids: [acc.id], only_missing_rt: false, delay_seconds: 0 }),
+      })
+      setTaskModalTitle(`${actionLabel} - ${acc.email}`)
+      setActionTaskId(result.task_id)
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e)
+      message.error(`${actionLabel}失败: ${detail}`)
+    } finally {
+      setRunningActionId(null)
+    }
+  }
+
   const handleAction = async (actionId: string) => {
     if (runningActionId) return
     const actionLabel = actions.find((item) => item.id === actionId)?.label || actionId
     const toastKey = `account-action:${acc?.id}:${actionId}`
+
+    if (actionId === 'backfill_refresh_token') {
+      await runAsTask(actionLabel)
+      return
+    }
+
     setRunningActionId(actionId)
     message.loading({ content: `${actionLabel}运行中...`, key: toastKey, duration: 0 })
 
@@ -467,6 +494,16 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
           loading={Boolean(runningActionId)}
         />
       </Dropdown>
+      <Modal
+        title={taskModalTitle}
+        open={Boolean(actionTaskId)}
+        onCancel={() => { setActionTaskId(null); onRefresh() }}
+        footer={null}
+        width={620}
+        maskClosable={false}
+      >
+        {actionTaskId ? <TaskLogPanel taskId={actionTaskId} kind="backfill_rt" onDone={onRefresh} /> : null}
+      </Modal>
       <Modal
         title={resultTitle}
         open={resultOpen}
@@ -1549,7 +1586,7 @@ export default function Accounts() {
         open={backfillRtModalOpen}
         onCancel={closeBackfillRtModal}
         footer={null}
-        width={520}
+        width={backfillRtTaskId ? 720 : 520}
         maskClosable={false}
       >
         {!backfillRtTaskId ? (
@@ -1603,7 +1640,7 @@ export default function Accounts() {
             </Form>
           </>
         ) : (
-          <TaskLogPanel taskId={backfillRtTaskId} onDone={() => { load() }} />
+          <TaskLogPanel taskId={backfillRtTaskId} kind="backfill_rt" onDone={() => { load() }} />
         )}
       </Modal>
 

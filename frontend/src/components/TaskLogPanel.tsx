@@ -7,6 +7,15 @@ import { API_BASE, apiFetch, getToken } from '@/lib/utils'
 interface TaskLogPanelProps {
   taskId: string
   onDone?: () => void
+  /** 任务类型只影响文案，日志流对所有后台任务都是同一套 */
+  kind?: TaskKind
+}
+
+type TaskKind = 'register' | 'backfill_rt'
+
+const KIND_TEXT: Record<TaskKind, { success: string; registered: string; total: string; done: string }> = {
+  register: { success: '注册成功', registered: '已注册', total: '总共注册', done: '注册完成' },
+  backfill_rt: { success: '补 RT 成功', registered: '已处理', total: '总共账号', done: '补 RT 完成' },
 }
 
 type TaskTerminalStatus = 'idle' | 'done' | 'failed' | 'stopped'
@@ -38,7 +47,8 @@ function mergeSummary(previous: RegisterSummary, incoming: Partial<RegisterSumma
   })
 }
 
-export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
+export function TaskLogPanel({ taskId, onDone, kind = 'register' }: TaskLogPanelProps) {
+  const text = KIND_TEXT[kind]
   const [lines, setLines] = useState<string[]>([])
   const [summary, setSummary] = useState<RegisterSummary>({ success: 0, registered: 0, total: 0 })
   const [error, setError] = useState('')
@@ -264,7 +274,7 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
 
   const footerText =
     terminalStatus === 'done'
-      ? { text: '注册完成', color: '#10b981' }
+      ? { text: text.done, color: '#10b981' }
       : terminalStatus === 'stopped'
         ? { text: '任务已停止', color: '#d97706' }
         : terminalStatus === 'failed'
@@ -274,9 +284,9 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <Space wrap style={{ marginBottom: 8 }}>
-        <Tag color="green">注册成功：{summary.success}</Tag>
-        <Tag color="blue">已注册：{summary.registered}</Tag>
-        <Tag color="default">总共注册：{summary.total}</Tag>
+        <Tag color="green">{text.success}：{summary.success}</Tag>
+        <Tag color="blue">{text.registered}：{summary.registered}</Tag>
+        <Tag color="default">{text.total}：{summary.total}</Tag>
       </Space>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>

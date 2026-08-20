@@ -1,3 +1,5 @@
+import logging
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -176,6 +178,60 @@ class RefreshTokenBackfillerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             provider.wait_for_otp("demo@example.com")
         self.assertIn("临时邮箱已过期", str(ctx.exception))
+
+
+class ProtocolLogMirrorTests(unittest.TestCase):
+    """补一个号要跑几十秒，协议层的步骤必须能实时进到任务日志里。"""
+
+    def setUp(self):
+        self.protocol_logger = logging.getLogger("platforms.chatgpt.protocol")
+        self.original_level = self.protocol_logger.level
+        self.original_handlers = list(self.protocol_logger.handlers)
+
+    def tearDown(self):
+        self.protocol_logger.setLevel(self.original_level)
+        self.protocol_logger.handlers = self.original_handlers
+
+    def test_protocol_steps_reach_the_task_log(self):
+        lines: list[str] = []
+        step_logger = logging.getLogger("platforms.chatgpt.protocol.auth_flow")
+
+        class _ChattyFlow(_FakeFlow):
+            def oauth_codex_rt_exchange(self, mail_provider=None):
+                step_logger.info("尝试 Codex OAuth 直连换取 refresh_token ...")
+                return super().oauth_codex_rt_exchange(mail_provider)
+
+        flow = _ChattyFlow(session_result={"refresh_token": "rt-new"})
+        result = _backfiller([flow], log_fn=lines.append).run()
+
+        self.assertTrue(result.success)
+        self.assertIn("[协议] 尝试 Codex OAuth 直连换取 refresh_token ...", lines)
+
+    def test_other_threads_logs_do_not_leak_into_this_task(self):
+        """批量补 RT 是多线程的，别把别的号的步骤串进来。"""
+        lines: list[str] = []
+        step_logger = logging.getLogger("platforms.chatgpt.protocol.auth_flow")
+
+        class _ForeignThreadFlow(_FakeFlow):
+            def oauth_codex_rt_exchange(self, mail_provider=None):
+                other = threading.Thread(target=lambda: step_logger.info("别人的步骤"))
+                other.start()
+                other.join()
+                step_logger.info("我的步骤")
+                return super().oauth_codex_rt_exchange(mail_provider)
+
+        flow = _ForeignThreadFlow(session_result={"refresh_token": "rt-new"})
+        _backfiller([flow], log_fn=lines.append).run()
+
+        self.assertIn("[协议] 我的步骤", lines)
+        self.assertNotIn("[协议] 别人的步骤", lines)
+
+    def test_logger_is_left_as_found(self):
+        flow = _FakeFlow(session_result={"refresh_token": "rt-new"})
+        _backfiller([flow], log_fn=[].append).run()
+
+        self.assertEqual(self.protocol_logger.level, self.original_level)
+        self.assertEqual(self.protocol_logger.handlers, self.original_handlers)
 
 
 class ProtocolOverridesTests(unittest.TestCase):
