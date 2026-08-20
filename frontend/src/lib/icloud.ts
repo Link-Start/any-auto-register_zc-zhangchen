@@ -20,3 +20,21 @@ export function formatDateTime(value?: string | null): string {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? '-' : parsed.toLocaleString()
 }
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+/** 邮件列表里用相对时间，扫起来比一串完整时间戳快得多。 */
+export function formatRelativeTime(value?: string | null): string {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '-'
+  const diff = Date.now() - parsed.getTime()
+  if (diff < 0) return parsed.toLocaleDateString()
+  if (diff < MINUTE) return '刚刚'
+  if (diff < HOUR) return `${Math.floor(diff / MINUTE)} 分钟前`
+  if (diff < DAY) return `${Math.floor(diff / HOUR)} 小时前`
+  if (diff < 7 * DAY) return `${Math.floor(diff / DAY)} 天前`
+  return parsed.toLocaleDateString()
+}

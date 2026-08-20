@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   App,
@@ -8,6 +8,7 @@ import {
   Drawer,
   Empty,
   Form,
+  Grid,
   Input,
   InputNumber,
   List,
@@ -27,8 +28,10 @@ import {
   DeleteOutlined,
   InboxOutlined,
   LoginOutlined,
+  PaperClipOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SearchOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
 import {
@@ -52,10 +55,11 @@ import {
   ICLOUD_HOURLY_ALIAS_LIMIT,
   ICLOUD_REGION_OPTIONS,
   formatDateTime,
+  formatRelativeTime,
   getICloudRegionLabel,
 } from '@/lib/icloud'
 
-const { Text, Paragraph } = Typography
+const { Text, Paragraph, Title } = Typography
 
 export default function ICloudPage() {
   const { message } = App.useApp()
@@ -521,10 +525,90 @@ function GenerateAliasModal({
   )
 }
 
+/** 邮件正文是不可信的第三方 HTML，放进 iframe 隔离，且不给 allow-scripts。 */
+function MessageBody({ item }: { item: ICloudMessage }) {
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  const [height, setHeight] = useState(240)
+  const html = item.html_body?.trim() ?? ''
+
+  const resize = useCallback(() => {
+    const measure = () => {
+      const body = frameRef.current?.contentDocument?.body
+      if (body) setHeight(body.scrollHeight + 32)
+    }
+    measure()
+    // 图片是 onLoad 之后才陆续解码的，高度还会再变一次。
+    window.setTimeout(measure, 300)
+  }, [])
+
+  useEffect(() => {
+    setHeight(240)
+  }, [item.id])
+
+  if (!html) {
+    const text = item.text_body?.trim() || item.snippet?.trim()
+    return text ? (
+      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.7 }}>{text}</div>
+    ) : (
+      <Text type="secondary">这封邮件没有正文</Text>
+    )
+  }
+
+  // 邮件 HTML 基本都假定浅色背景，深色主题下直接渲染会出现黑字黑底。
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'none'">
+<style>
+  html,body{margin:0;padding:16px;background:#fff;color:#1f1f1f;
+    font:14px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    word-break:break-word;overflow-wrap:anywhere;}
+  img,table{max-width:100%!important;height:auto;}
+  a{color:#1677ff;}
+</style></head><body>${html}</body></html>`
+
+  return (
+    <iframe
+      ref={frameRef}
+      title="邮件正文"
+      sandbox="allow-same-origin"
+      srcDoc={srcDoc}
+      onLoad={resize}
+      style={{ width: '100%', height, border: 0, borderRadius: 8, background: '#fff', display: 'block' }}
+    />
+  )
+}
+
+function MessageDetail({ item }: { item: ICloudMessage }) {
+  const sender = item.from.name || item.from.email
+  return (
+    <div>
+      <Title level={5} style={{ marginTop: 0, marginBottom: 12, wordBreak: 'break-word' }}>
+        {item.subject || '(无主题)'}
+      </Title>
+      <Space direction="vertical" size={4} style={{ width: '100%', marginBottom: 16 }}>
+        <Space wrap size={8}>
+          <Text strong>{sender}</Text>
+          {item.from.name && <Text type="secondary">&lt;{item.from.email}&gt;</Text>}
+          {item.has_attachments && <Tag icon={<PaperClipOutlined />}>含附件</Tag>}
+        </Space>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          发往 {item.to.map((address) => address.email).join('、') || item.alias_address} ·{' '}
+          {formatDateTime(item.received_at)}
+        </Text>
+      </Space>
+      <MessageBody item={item} />
+    </div>
+  )
+}
+
 function AliasInboxDrawer({ alias, onClose }: { alias: ICloudAlias | null; onClose: () => void }) {
   const { message } = App.useApp()
+  const screens = Grid.useBreakpoint()
   const [messages, setMessages] = useState<ICloudMessage[]>([])
   const [loading, setLoading] = useState(false)
+  const [selectedId, setSelectedId] = useState('')
+  const [keyword, setKeyword] = useState('')
+
+  const isNarrow = !screens.md
 
   const load = useCallback(async () => {
     if (!alias) return
@@ -541,47 +625,145 @@ function AliasInboxDrawer({ alias, onClose }: { alias: ICloudAlias | null; onClo
 
   useEffect(() => {
     setMessages([])
+    setSelectedId('')
+    setKeyword('')
     load()
   }, [load])
+
+  const visible = useMemo(() => {
+    const needle = keyword.trim().toLowerCase()
+    if (!needle) return messages
+    return messages.filter((item) =>
+      [item.subject, item.from.name, item.from.email, item.snippet, item.text_body]
+        .join(' ')
+        .toLowerCase()
+        .includes(needle),
+    )
+  }, [messages, keyword])
+
+  // 宽屏默认摊开第一封，省掉一次点击；窄屏保持列表优先，点了才进详情。
+  const selected =
+    visible.find((item) => item.id === selectedId) ?? (isNarrow ? undefined : visible[0])
+
+  const messageList = (
+    <List
+      loading={loading}
+      dataSource={visible}
+      locale={{
+        emptyText: <Empty description={keyword ? '没有匹配的邮件' : '暂时没有收到邮件'} />,
+      }}
+      renderItem={(item) => {
+        const active = selected?.id === item.id
+        return (
+          <List.Item
+            onClick={() => setSelectedId(item.id)}
+            style={{
+              cursor: 'pointer',
+              padding: '12px 16px',
+              borderInlineStart: `3px solid ${active ? 'var(--ant-color-primary, #1677ff)' : 'transparent'}`,
+              background: active ? 'var(--ant-color-fill-tertiary, rgba(255,255,255,0.06))' : undefined,
+            }}
+          >
+            {/* 这里刻意不用 Space：它会给每个子元素套一层 div，flex:1 落不到文本上，
+                长主题和长发件人地址就截不断——正是原来那版糊成一片的原因。 */}
+            <div style={{ width: '100%', minWidth: 0, display: 'grid', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <Text strong={!item.is_read} ellipsis style={{ flex: 1, minWidth: 0 }}>
+                  {item.subject || '(无主题)'}
+                </Text>
+                {item.has_attachments && <PaperClipOutlined style={{ opacity: 0.55 }} />}
+                {!item.is_read && <Badge status="processing" />}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <Text type="secondary" ellipsis style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
+                  {item.from.name || item.from.email}
+                </Text>
+                <Tooltip title={formatDateTime(item.received_at)}>
+                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    {formatRelativeTime(item.received_at)}
+                  </Text>
+                </Tooltip>
+              </div>
+              <Text type="secondary" ellipsis style={{ fontSize: 12, opacity: 0.75 }}>
+                {item.snippet}
+              </Text>
+            </div>
+          </List.Item>
+        )
+      }}
+    />
+  )
+
+  const detailPane = selected ? (
+    <MessageDetail item={selected} />
+  ) : (
+    <div style={{ display: 'grid', placeItems: 'center', height: '100%', minHeight: 240 }}>
+      <Empty description="选择左侧邮件查看正文" />
+    </div>
+  )
 
   return (
     <Drawer
       open={Boolean(alias)}
       onClose={onClose}
-      width={640}
-      title={alias ? `收件箱 · ${alias.address}` : '收件箱'}
-      extra={<Button icon={<ReloadOutlined spin={loading} />} onClick={load} />}
+      width={isNarrow ? '100%' : 'min(1080px, 92vw)'}
+      styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
+      title={
+        <Tooltip title={alias?.address}>
+          <Text ellipsis style={{ maxWidth: '100%' }}>
+            收件箱 · {alias?.address ?? ''}
+          </Text>
+        </Tooltip>
+      }
+      extra={
+        <Space>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {messages.length} 封
+          </Text>
+          <Button icon={<ReloadOutlined spin={loading} />} onClick={load} />
+        </Space>
+      }
     >
-      <Paragraph type="secondary">
-        每次打开都会通过 IMAP 实时读取主号收件箱中投递到该地址的邮件，不使用本地缓存。
-      </Paragraph>
-      <List
-        loading={loading}
-        dataSource={messages}
-        locale={{ emptyText: <Empty description="暂时没有收到邮件" /> }}
-        renderItem={(item) => (
-          <List.Item>
-            <List.Item.Meta
-              title={
-                <Space>
-                  <Text strong>{item.subject || '(无主题)'}</Text>
-                  {!item.is_read && <Tag color="blue">未读</Tag>}
-                </Space>
-              }
-              description={
-                <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                  <Text type="secondary">
-                    {item.from.name ? `${item.from.name} <${item.from.email}>` : item.from.email}
-                    {' · '}
-                    {formatDateTime(item.received_at)}
-                  </Text>
-                  <Text>{item.snippet}</Text>
-                </Space>
-              }
-            />
-          </List.Item>
-        )}
-      />
+      {isNarrow && selected ? (
+        <div style={{ padding: 16, overflow: 'auto' }}>
+          <Button type="link" style={{ paddingInline: 0 }} onClick={() => setSelectedId('')}>
+            ← 返回列表
+          </Button>
+          <div style={{ marginTop: 8 }}>{detailPane}</div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+          <div
+            style={{
+              width: isNarrow ? '100%' : 320,
+              flex: isNarrow ? 1 : '0 0 320px',
+              borderInlineEnd: isNarrow ? undefined : '1px solid var(--ant-color-split, rgba(255,255,255,0.12))',
+              display: 'flex',
+              flexDirection: 'column',
+              minHeight: 0,
+            }}
+          >
+            <div style={{ padding: 12 }}>
+              <Input
+                allowClear
+                prefix={<SearchOutlined />}
+                placeholder="搜索主题、发件人、正文"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+              />
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>{messageList}</div>
+          </div>
+          {!isNarrow && (
+            <div style={{ flex: 1, overflow: 'auto', padding: 20, minWidth: 0 }}>
+              {detailPane}
+              <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 24, marginBottom: 0 }}>
+                每次打开都会通过 IMAP 实时读取主号收件箱中投递到该地址的邮件，不使用本地缓存。
+              </Paragraph>
+            </div>
+          )}
+        </div>
+      )}
     </Drawer>
   )
 }
