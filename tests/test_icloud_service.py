@@ -126,6 +126,8 @@ def test_unreadable_credentials_report_a_relogin_hint(service, stub_web_client, 
 
     assert excinfo.value.code == "credentials_unreadable"
     assert "重新登录" in str(excinfo.value)
+    # InvalidTag 的 str() 是空的，不能在消息尾巴上留一个空括号
+    assert not str(excinfo.value).endswith("（）")
 
     # 账号列表不能因此整个 500，要能标出这一条坏掉了
     assert service.list_accounts()[0]["credential_state"] == {"credentials_unreadable": True}

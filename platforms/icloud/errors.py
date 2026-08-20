@@ -23,9 +23,11 @@ class ICloudError(RuntimeError):
         self.__cause__ = cause
 
     def __str__(self) -> str:
-        if self.__cause__ is None:
+        # 有些异常（如 cryptography 的 InvalidTag）str() 为空，直接拼会留下一个"（）"。
+        cause = str(self.__cause__) if self.__cause__ is not None else ""
+        if not cause.strip():
             return self.message
-        return f"{self.message}（{self.__cause__}）"
+        return f"{self.message}（{cause}）"
 
 
 def invalid_config(message: str, cause: Optional[BaseException] = None) -> ICloudError:
