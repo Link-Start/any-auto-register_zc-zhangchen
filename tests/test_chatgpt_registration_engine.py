@@ -128,12 +128,11 @@ class RegistrationEngineConfigTests(unittest.TestCase):
 
         self.assertEqual(overrides["WEBUI_ALLOW_LOGIN"], "1")
         self.assertEqual(overrides["OTP_TIMEOUT"], "180")
-        self.assertNotIn("SKIP_OAUTH_TOKEN_EXCHANGE", overrides)
+        self.assertNotIn("OAUTH_CODEX_RT_EXCHANGE", overrides)
 
     def test_access_token_only_mode_skips_codex_oauth(self):
         overrides = self._engine(mode=REGISTRATION_MODE_ACCESS_TOKEN_ONLY)._env_overrides()
 
-        self.assertEqual(overrides["SKIP_OAUTH_TOKEN_EXCHANGE"], "1")
         self.assertEqual(overrides["OAUTH_CODEX_RT_EXCHANGE"], "0")
         self.assertEqual(overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"], "0")
 

@@ -155,7 +155,6 @@ class ChatGPTRegistrationEngine:
 
         if self.mode == REGISTRATION_MODE_ACCESS_TOKEN_ONLY:
             # 不要 refresh_token 就别跑 Codex OAuth：每次都要多花约 10 秒且必然告警
-            overrides["SKIP_OAUTH_TOKEN_EXCHANGE"] = "1"
             overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
             overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
 
