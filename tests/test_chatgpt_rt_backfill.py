@@ -57,10 +57,10 @@ class _FakeFlow:
 
     def run_protocol_login(self, mail_provider, email, password=""):
         self.login_calls.append((mail_provider, email, password))
-        if self._login_error:
-            raise self._login_error
         for key, value in (self._login_result or {}).items():
             setattr(self.result, key, value)
+        if self._login_error:
+            raise self._login_error
         return self.result
 
 
@@ -141,6 +141,19 @@ class RefreshTokenBackfillerTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertIn("密码错误", result.error_message)
+
+    def test_rt_obtained_before_a_late_crash_is_still_kept(self):
+        """RT 是链路中段换到的，末段再炸不该把它一起扔掉。"""
+        session_flow = _FakeFlow()
+        login_flow = _FakeFlow(
+            login_result={"refresh_token": "rt-login"},
+            login_error=RuntimeError("拉 session 超时"),
+        )
+        result = _backfiller([session_flow, login_flow]).run()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.refresh_token, "rt-login")
+        self.assertIn("拉 session 超时", result.attempts[-1].message)
 
     def test_missing_email_fails_fast(self):
         result = RefreshTokenBackfiller(email=" ").run()

@@ -152,6 +152,8 @@ class RefreshTokenBackfiller:
         self.mail_unavailable_reason = mail_unavailable_reason
         self.allow_login = allow_login
         self.log = log_fn or logger.info
+        # 当前正在跑的 flow，报错后还要从它身上把已到手的凭证捞回来
+        self._active_flow: Optional[AuthFlow] = None
 
     # ── 主流程 ──
 
@@ -170,23 +172,28 @@ class RefreshTokenBackfiller:
                 result.attempts.append(BackfillAttempt(strategy, False, skip_reason))
                 continue
 
+            self._active_flow = None
+            failure = ""
             try:
-                flow = runner()
+                runner()
             except Exception as exc:
-                message = str(exc) or exc.__class__.__name__
-                self.log(f"[补RT] {self._label(strategy)}失败: {message}")
-                result.attempts.append(BackfillAttempt(strategy, False, message))
-                continue
+                failure = str(exc) or exc.__class__.__name__
+                self.log(f"[补RT] {self._label(strategy)}报错: {failure}")
 
-            self._absorb(result, flow)
+            # 即使抛了异常也要看一眼手上的凭证：RT 是在链路中段换到的，末段
+            # 再炸（拉 session、写 cookie 之类）不该把已经到手的 RT 一起扔掉。
+            if self._active_flow is not None:
+                self._absorb(result, self._active_flow)
+
             if result.refresh_token:
                 result.success = True
                 result.strategy = strategy
-                result.attempts.append(BackfillAttempt(strategy, True, "拿到 refresh_token"))
+                note = f"末段报错但 RT 已到手：{failure}" if failure else "拿到 refresh_token"
+                result.attempts.append(BackfillAttempt(strategy, True, note))
                 self.log(f"[补RT] {self._label(strategy)}成功: {self.email}")
                 return result
 
-            message = "流程跑完但没拿到 refresh_token"
+            message = failure or "流程跑完但没拿到 refresh_token"
             self.log(f"[补RT] {self._label(strategy)}未果: {message}")
             result.attempts.append(BackfillAttempt(strategy, False, message))
 
@@ -195,26 +202,26 @@ class RefreshTokenBackfiller:
 
     # ── 策略一：复用已有会话 ──
 
-    def _try_session(self) -> AuthFlow:
+    def _try_session(self) -> None:
         self.log(f"[补RT] 尝试复用已有会话: {self.email}")
         flow = self._build_flow(_SESSION_OVERRIDES)
+        self._active_flow = flow
         flow.from_existing_credentials(self.session_token, self.access_token, self.device_id)
         if not (flow.result.access_token or flow.result.session_token):
             raise RuntimeError("库里的 session/access token 已失效")
         # 授权链被打回 /log-in 时协议层会自己补一次登录，届时可能要邮箱验证码
         flow.oauth_codex_rt_exchange(mail_provider=self.mail_provider)
-        return flow
 
     # ── 策略二：协议重新登录 ──
 
-    def _try_login(self) -> AuthFlow:
+    def _try_login(self) -> None:
         self.log(f"[补RT] 会话不可用，改走协议重登: {self.email}")
         flow = self._build_flow(_LOGIN_OVERRIDES)
+        self._active_flow = flow
         provider = self.mail_provider or MailboxUnavailableProvider(
             self.email, self.mail_unavailable_reason
         )
         flow.run_protocol_login(provider, self.email, self.password)
-        return flow
 
     # ── 组装 ──
 
