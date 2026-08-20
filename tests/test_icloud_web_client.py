@@ -8,7 +8,7 @@ import requests
 from requests.adapters import BaseAdapter
 
 from platforms.icloud.build_info import BuildInfo, BuildInfoCache, parse_app_build
-from platforms.icloud.constants import FALLBACK_CLOUD_BUILD
+from platforms.icloud.constants import DEFAULT_ALIAS_LABEL, FALLBACK_CLOUD_BUILD
 from platforms.icloud.credentials import ICloudCredentials
 from platforms.icloud.errors import ICloudError
 from platforms.icloud.models import SessionImportRequest
@@ -80,6 +80,21 @@ def test_generate_private_email_reserves_and_returns_address():
     assert private_email.provider_id == "anon-1"
     reserve_body = json.loads(adapter.requests[-1].body)
     assert reserve_body == {"hme": "abc@icloud.com", "label": "任务", "note": "备注"}
+
+
+def test_blank_label_is_replaced_before_reserve():
+    """标签在界面上是选填的，但 Apple 的 reserve 收到空标签会回 invalid Label。"""
+
+    def handler(request):
+        if request.url.split("?")[0].endswith("/v1/hme/generate"):
+            return 200, {"success": True, "result": {"hme": "abc@icloud.com"}}, {}
+        return 200, {"success": True, "result": {"hme": "abc@icloud.com"}}, {}
+
+    client, adapter = _client(handler)
+    private_email = client.generate_private_email(_credentials(), label="   ", note="")
+
+    assert json.loads(adapter.requests[-1].body)["label"] == DEFAULT_ALIAS_LABEL
+    assert private_email.label == DEFAULT_ALIAS_LABEL
 
 
 def test_hme_endpoint_carries_dsid_and_build_numbers():

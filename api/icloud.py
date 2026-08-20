@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from platforms.icloud import (
+    DEFAULT_ALIAS_LABEL,
     DEFAULT_IMAP_HOST,
     DEFAULT_IMAP_PORT,
     ICloudError,
@@ -94,6 +95,12 @@ class CookieImportRequest(BaseModel):
 
 class AccountUpdateRequest(BaseModel):
     enabled: bool
+
+
+def _alias_label(label: str, index: int, count: int) -> str:
+    """一次生成多个时给标签编号，避免 Apple 那边一串同名地址分不清。"""
+    label = label.strip() or DEFAULT_ALIAS_LABEL
+    return f"{label} {index}" if count > 1 else label
 
 
 class GenerateAliasRequest(BaseModel):
@@ -251,8 +258,10 @@ def generate_aliases(body: GenerateAliasRequest):
     try:
         account_id = body.account_id or icloud_service.resolve_account(body.account_email).id
         created = [
-            icloud_service.generate_alias(account_id, label=body.label, note=body.note)
-            for _ in range(body.count)
+            icloud_service.generate_alias(
+                account_id, label=_alias_label(body.label, index, body.count), note=body.note
+            )
+            for index in range(1, body.count + 1)
         ]
     except ICloudError as error:
         raise _http_error(error) from error

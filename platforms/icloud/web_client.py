@@ -15,6 +15,7 @@ import requests
 
 from .build_info import BuildInfoCache, is_official_service_url
 from .constants import (
+    DEFAULT_ALIAS_LABEL,
     DEFAULT_SYNC_LIMIT,
     ALIAS_STATUS_ACTIVE,
     ALIAS_STATUS_DISABLED,
@@ -158,6 +159,10 @@ class ICloudWebClient:
         label: str = "",
         note: str = "",
     ) -> PrivateEmail:
+        # Apple 的 reserve 不接受空标签，会回 {"errorCode":"400","errorMessage":"invalid Label"}。
+        # 标签在界面上是选填的，所以这里兜住，避免用户留空就报一个看不懂的上游错误。
+        label = label.strip() or DEFAULT_ALIAS_LABEL
+
         generated = self._hme_request(
             credentials, "POST", "v1/hme/generate", {"langCode": "en-us"}
         )

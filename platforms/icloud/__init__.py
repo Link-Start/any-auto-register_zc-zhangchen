@@ -4,6 +4,7 @@ from .client import build_cache, fetch_inbox, login_manager, web_client
 from .constants import (
     ALIAS_STATUS_ACTIVE,
     ALIAS_STATUS_DISABLED,
+    DEFAULT_ALIAS_LABEL,
     DEFAULT_IMAP_HOST,
     DEFAULT_IMAP_PORT,
     LOGIN_STATUS_COMPLETED,
@@ -18,6 +19,7 @@ from .models import ImportedSession, MailMessage, PrivateEmail, SessionImportReq
 __all__ = [
     "ALIAS_STATUS_ACTIVE",
     "ALIAS_STATUS_DISABLED",
+    "DEFAULT_ALIAS_LABEL",
     "DEFAULT_IMAP_HOST",
     "DEFAULT_IMAP_PORT",
     "ICloudCredentials",
