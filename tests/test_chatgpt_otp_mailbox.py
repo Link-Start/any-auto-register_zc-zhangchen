@@ -237,6 +237,48 @@ class ResolveProviderTests(unittest.TestCase):
         self.assertEqual(provider._account.extra["refresh_token"], "rt")
         self.assertEqual(reason, "")
 
+    def test_plus_alias_in_the_pool_still_matches_the_base_address(self):
+        """号池存 xxx+abc@outlook.com，账号表记 xxx@outlook.com，是同一个信箱。"""
+        self._add_outlook("legacy+tag1@outlook.com")
+        mailbox = _StubMailbox(ids=set())
+
+        with mock.patch("core.base_mailbox.create_mailbox", return_value=mailbox):
+            provider, reason = resolve_otp_mail_provider("legacy@outlook.com", config={})
+
+        self.assertIsInstance(provider, FixedAddressProviderAdapter)
+        self.assertEqual(reason, "")
+        # 登录身份用号池那条记录的地址，别名 IMAP 登不上
+        self.assertEqual(provider._account.email, "legacy+tag1@outlook.com")
+        self.assertEqual(provider._account.extra["refresh_token"], "rt")
+
+    def test_base_address_in_the_pool_matches_a_plus_alias_account(self):
+        self._add_outlook("legacy@outlook.com")
+        mailbox = _StubMailbox(ids=set())
+
+        with mock.patch("core.base_mailbox.create_mailbox", return_value=mailbox):
+            provider, _ = resolve_otp_mail_provider("legacy+tag9@outlook.com", config={})
+
+        self.assertEqual(provider._account.email, "legacy@outlook.com")
+
+    def test_exact_match_still_wins_over_the_alias_fallback(self):
+        self._add_outlook("legacy+tag1@outlook.com")
+        self._add_outlook("legacy@outlook.com")
+        mailbox = _StubMailbox(ids=set())
+
+        with mock.patch("core.base_mailbox.create_mailbox", return_value=mailbox):
+            provider, _ = resolve_otp_mail_provider("legacy@outlook.com", config={})
+
+        self.assertEqual(provider._account.email, "legacy@outlook.com")
+
+    def test_unrelated_address_does_not_borrow_pool_credentials(self):
+        self._add_outlook("legacy+tag1@outlook.com")
+
+        with mock.patch("core.base_mailbox.create_mailbox") as factory:
+            provider, reason = resolve_otp_mail_provider("someone-else@outlook.com", config={})
+
+        factory.assert_not_called()
+        self.assertIsNone(provider)
+
     def test_configured_provider_used_when_domain_matches(self):
         mailbox = _StubMailbox(ids=set())
 

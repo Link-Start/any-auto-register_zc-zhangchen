@@ -226,16 +226,14 @@ def _build_icloud_provider(address: str, *, log_fn=None, **_kwargs):
 
 
 def _build_outlook_provider(address: str, *, config: dict, proxy=None, otp_timeout=None, **_kwargs):
-    from sqlmodel import Session, select
+    from sqlmodel import Session
 
     from core.base_mailbox import MailboxAccount, create_mailbox
-    from core.db import OutlookAccountModel, engine
+    from core.db import engine
     from platforms.chatgpt.protocol.mailbox_adapter import FixedAddressProviderAdapter
 
     with Session(engine) as session:
-        row = session.exec(
-            select(OutlookAccountModel).where(OutlookAccountModel.email == address)
-        ).first()
+        row = _find_outlook_row(session, address)
         if row is None:
             return None, ""
         credentials = {
@@ -247,13 +245,54 @@ def _build_outlook_provider(address: str, *, config: dict, proxy=None, otp_timeo
             "mailapi_url": row.mailapi_url or "",
         }
         account_id = str(row.id or "")
+        # IMAP/OAuth 认的是号池里那条记录的地址，别名登不上去
+        login_email = (row.email or "").strip() or address
 
     mailbox = create_mailbox("outlook", extra=config, proxy=proxy)
-    account = MailboxAccount(email=address, account_id=account_id, extra=credentials)
+    account = MailboxAccount(email=login_email, account_id=account_id, extra=credentials)
     return (
         FixedAddressProviderAdapter(mailbox, account, kind="微软邮箱", otp_timeout=otp_timeout),
         "",
     )
+
+
+def _find_outlook_row(session, address: str):
+    """按地址找号池记录，精确匹配落空时按 ``+`` 前的主地址再找一遍。
+
+    微软的 ``xxx+abc@outlook.com`` 和 ``xxx@outlook.com`` 是同一个信箱、同一套
+    凭据，注册时用哪个形态入库全看当时的策略。只做精确匹配的话，账号表记主
+    地址、号池存别名（或反过来）就会判成"读不到收件箱"，然后在等码那步白等
+    满一个 OTP 超时才失败。
+    """
+    from sqlmodel import select
+
+    from core.db import OutlookAccountModel
+
+    exact = session.exec(
+        select(OutlookAccountModel).where(OutlookAccountModel.email == address)
+    ).first()
+    if exact is not None:
+        return exact
+
+    local, _, domain = address.partition("@")
+    if not domain:
+        return None
+    base_local = local.split("+", 1)[0]
+
+    if base_local != local:
+        base = session.exec(
+            select(OutlookAccountModel).where(
+                OutlookAccountModel.email == f"{base_local}@{domain}"
+            )
+        ).first()
+        if base is not None:
+            return base
+
+    return session.exec(
+        select(OutlookAccountModel).where(
+            OutlookAccountModel.email.like(f"{base_local}+%@{domain}")
+        )
+    ).first()
 
 
 def _build_configured_provider(
