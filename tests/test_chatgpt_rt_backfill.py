@@ -199,12 +199,18 @@ class ProtocolLogMirrorTests(unittest.TestCase):
 
     def setUp(self):
         self.protocol_logger = logging.getLogger("platforms.chatgpt.protocol")
+        self.sms_logger = logging.getLogger("services.sms_service")
+        self.original = [
+            (target, target.level, list(target.handlers))
+            for target in (self.protocol_logger, self.sms_logger)
+        ]
         self.original_level = self.protocol_logger.level
         self.original_handlers = list(self.protocol_logger.handlers)
 
     def tearDown(self):
-        self.protocol_logger.setLevel(self.original_level)
-        self.protocol_logger.handlers = self.original_handlers
+        for target, level, handlers in self.original:
+            target.setLevel(level)
+            target.handlers = handlers
 
     def test_protocol_steps_reach_the_task_log(self):
         lines: list[str] = []
@@ -239,6 +245,21 @@ class ProtocolLogMirrorTests(unittest.TestCase):
 
         self.assertIn("[协议] 我的步骤", lines)
         self.assertNotIn("[协议] 别人的步骤", lines)
+
+    def test_sms_platform_logs_are_mirrored_too(self):
+        """租号退款关系到钱，出问题时最需要在任务日志里看见。"""
+        lines: list[str] = []
+        sms_logger = logging.getLogger("services.sms_service")
+
+        class _RentingFlow(_FakeFlow):
+            def oauth_codex_rt_exchange(self, mail_provider=None):
+                sms_logger.info("号 activation_id=%s 退款成功（原因: %s）", "1", "步骤失效")
+                return super().oauth_codex_rt_exchange(mail_provider)
+
+        flow = _RentingFlow(session_result={"refresh_token": "rt-new"})
+        _backfiller([flow], log_fn=lines.append).run()
+
+        self.assertIn("[接码平台] 号 activation_id=1 退款成功（原因: 步骤失效）", lines)
 
     def test_logger_is_left_as_found(self):
         flow = _FakeFlow(session_result={"refresh_token": "rt-new"})
