@@ -41,7 +41,10 @@ _ERROR_STATUS = {
     "credentials_unreadable": 409,
     "mail_access_denied": 403,
     "provider_rate_limited": 429,
-    "upstream_rejected": 502,
+    # upstream_rejected 是"Apple 收到了并明确拒绝"，属于请求语义问题而不是网关故障。
+    # 用 5xx 表达还有个致命副作用：Cloudflare 会把 5xx 的响应体整个换成自己的错误页，
+    # 用户只看得到一张 "502 Bad gateway"，Apple 到底说了什么全丢了。
+    "upstream_rejected": 422,
     "upstream_error": 502,
     "invalid_response": 502,
     "upstream_unavailable": 503,

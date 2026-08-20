@@ -163,6 +163,25 @@ def test_upstream_failure_maps_to_http_503(client, monkeypatch):
     assert icloud_service.get_account(account["id"]).sync_error == "Apple 服务暂时不可用"
 
 
+def test_apple_rejection_stays_in_4xx_so_the_reason_survives(client, monkeypatch):
+    """Apple 明确拒绝要走 4xx。
+
+    用 5xx 表达的话，Cloudflare 会把响应体换成自己的 "502 Bad gateway" 页面，
+    Apple 给的原因就彻底没了——线上就是这么丢的。
+    """
+    account = _import_account(client)
+
+    def _rejected(*_args, **_kwargs):
+        raise ICloudError("upstream_rejected", "iCloud HME 拒绝了请求")
+
+    monkeypatch.setattr(client.stub, "generate_private_email", _rejected)
+
+    response = client.post("/api/icloud/aliases", json={"account_id": account["id"]})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "iCloud HME 拒绝了请求"
+
+
 def test_unknown_account_and_alias_map_to_http_404(client):
     assert client.post("/api/icloud/accounts/999/sync").status_code == 404
     assert client.request("DELETE", "/api/icloud/aliases/999").status_code == 404
