@@ -740,3 +740,46 @@ def ua_for_impersonate(impersonate: str, current_ua: str) -> str:
             f"Gecko/20100101 Firefox/{d['ver']}"
         )
     return current_ua
+
+
+_FAMILIES = ("chrome", "mac_safari", "ios_safari", "firefox")
+
+
+def family_impersonates(impersonate: str) -> list[str]:
+    """同家族的 impersonate 列表，当前这个排第一（同族回退用）。"""
+    entry = _ALL_IMPERSONATES.get(impersonate)
+    if not entry:
+        return [impersonate]
+    family = entry["type"]
+    others = [
+        name for name, e in _ALL_IMPERSONATES.items()
+        if e["type"] == family and name != impersonate
+    ]
+    return [impersonate] + others
+
+
+def cross_family_impersonates(
+    impersonate: str, rng: random.Random | None = None
+) -> list[str]:
+    """给出**其它家族**的 impersonate，每族一个，顺序随机。
+
+    风控是按家族整体封的，不是按版本：2026-08-21 实测 chatgpt.com warmup，
+    chrome136/142/146 全 403（只给 __cf_bm），mac_safari / ios_safari /
+    firefox 全 200 并正常种下 oai-did。同族换版本对这种封锁没有意义。
+
+    顺序不写死：今天挂的是 chrome，明天可能换成别的家族。随机轮换让 4 次重试
+    把其它家族都覆盖到，而不是赌某一族一定能用。
+    """
+    r = rng or random
+    current_family = (_ALL_IMPERSONATES.get(impersonate) or {}).get("type", "")
+    families = [f for f in _FAMILIES if f != current_family]
+    r.shuffle(families)
+
+    out: list[str] = []
+    for family in families:
+        names = sorted(
+            name for name, e in _ALL_IMPERSONATES.items() if e["type"] == family
+        )
+        if names:
+            out.append(r.choice(names))
+    return out

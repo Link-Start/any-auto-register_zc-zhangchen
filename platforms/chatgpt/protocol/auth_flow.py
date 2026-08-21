@@ -30,6 +30,8 @@ from platforms.chatgpt.protocol.fingerprint import (
     generate_fingerprint,
     ua_for_impersonate,
     fingerprint_for_impersonate,
+    cross_family_impersonates,
+    family_impersonates,
 )
 from platforms.chatgpt.protocol.mail_provider import MailProvider
 from platforms.chatgpt.protocol.http_client import create_http_session, USER_AGENT
@@ -1436,17 +1438,38 @@ class AuthFlow:
             return False
         self._impersonate_idx += 1
         imp = self._impersonate_candidates[self._impersonate_idx]
-        self._ua = ua_for_impersonate(imp, self._ua)
-        # 让 client hints 跟上新版本，保持 UA 与头自洽
-        try:
-            self._fingerprint = fingerprint_for_impersonate(imp, self._fingerprint)
-        except Exception as e:  # 兜底：宁可维持旧指纹也不要把流程搞崩
-            logger.warning(f"client hints 同步失败（沿用旧指纹）: {e}")
+        self._sync_fingerprint_to(imp)
         logger.warning(f"TLS 异常，切换指纹重试: impersonate={imp}, ua={self._ua[:60]}...")
         self.session = create_http_session(
             proxy=self.config.proxy, impersonate=imp, user_agent=self._ua,
         )
         return True
+
+    def _sync_fingerprint_to(self, impersonate: str) -> None:
+        """换 impersonate 时把 UA 和 client hints 一起对齐。
+
+        少了任何一样都会造出「UA 说 Chrome、sec-ch-ua 说别的」这种自相矛盾的头，
+        那是 CF 一抓一个准的特征。
+
+        UA 必须**从新指纹里取**，不能自己再调一次 ua_for_impersonate：那个函数每
+        次都会重新随机一个系统版本，调两次就会得到「会话 UA 说 macOS 14_4、指纹
+        里记的是 14_5」这种同样自相矛盾的组合。
+        """
+        try:
+            self._fingerprint = fingerprint_for_impersonate(impersonate, self._fingerprint)
+            self._ua = self._fingerprint.get("user_agent") or self._ua
+        except Exception as e:  # 兜底：宁可维持旧指纹也不要把流程搞崩
+            logger.warning(f"client hints 同步失败（沿用旧指纹）: {e}")
+            self._ua = ua_for_impersonate(impersonate, self._ua)
+
+    def _switch_browser_family(self, impersonate: str) -> None:
+        """跨家族换指纹：UA、client hints、同族回退列表一起换掉。
+
+        同族回退列表也得跟着走，否则之后遇到 TLS 异常会跳回原来那个家族。
+        """
+        self._sync_fingerprint_to(impersonate)
+        self._impersonate_candidates = family_impersonates(impersonate)
+        self._impersonate_idx = 0
 
     @staticmethod
     def _datadog_trace_headers() -> dict:
@@ -1597,9 +1620,23 @@ class AuthFlow:
            不是换成 safari —— 换指纹只是绕开症状，且会让 self._fingerprint 与
            self._ua 不一致（后续 _common_headers 会拿旧家族的 CH 配新 UA，更假）。
 
-        重试只换出口 IP，不换指纹（指纹本来就没问题，见上）：代理池按会话分配
-        出口，新 session ≈ 新 IP，绕开连不上的坏 IP。cookie 跟着 session 一起
-        清掉是对的：失败轮本来就没种到有用的东西。
+        4. **【2026-08-21 更新】CF 改成按家族封，chrome 全族 403。**
+           上面第 3 条"补齐 client hints 后 chrome 就好了"已经过期。线上注册连挂，
+           同一台机器（无代理，出口 107.174.102.240）当场实测：
+
+               impersonate                  结果
+               chrome136 / 142 / 146        403，只给 __cf_bm
+               mac_safari / ios_safari      200，oai-did 正常种下
+               firefox133                   200，oai-did 正常种下
+
+           头是对的、IP 是好的（5 小时前同一 IP 刚跑通过一轮补 RT），封的是
+           chrome 的 TLS/HTTP2 指纹本身。所以重试**必须换家族**——原来那句
+           "只换出口 IP，不换指纹"在这种封锁下等于拿同一张脸连撞 4 次。
+
+        重试同时换出口 IP 和浏览器家族：代理池按会话分配出口，新 session ≈ 新 IP，
+        绕开连不上的坏 IP；换家族绕开整族封锁。cookie 跟着 session 一起清掉是对的：
+        失败轮本来就没种到有用的东西。家族顺序是随机的，不写死"safari 更安全"——
+        今天挂的是 chrome，明天可能轮到别的。
 
         注：URL 保持首页 `/`。实测对比过 `/auth/login`（16 轮 vs 10 轮），
         失败率 18.75% vs 20%，无差异，不值得换。
@@ -1609,12 +1646,15 @@ class AuthFlow:
         **3/3 全成功**（各约 100s，password + access_token 齐全），409 = 0。
         """
         headers = self._navigation_headers()
+        family_fallbacks = cross_family_impersonates(self._fingerprint.get("impersonate", ""))
 
         for attempt in range(4):
             if attempt:
-                # 只换出口 IP（新 session = 新出口），指纹保持不变：
-                # 403 是缺 client hints 导致的，已在头里修好，不是指纹的锅。
                 time.sleep(3 + attempt * 2)
+                # 换出口 IP（新 session = 新出口）的同时换浏览器家族
+                if family_fallbacks:
+                    self._switch_browser_family(family_fallbacks.pop(0))
+                    headers = self._navigation_headers()
                 self.session = create_http_session(
                     proxy=self.config.proxy,
                     impersonate=self._impersonate_candidates[self._impersonate_idx],
@@ -1635,20 +1675,24 @@ class AuthFlow:
                 cookies = self.session.cookies.get_dict()
             except Exception:
                 cookies = {}
+            imp = self._fingerprint.get("impersonate", "")
             if "oai-did" in cookies:
                 logger.info(
-                    f"chatgpt.com warmup 完成（第 {attempt + 1} 次，oai-did 已种，"
-                    f"共 {len(cookies)} 个 cookie）"
+                    f"chatgpt.com warmup 完成（第 {attempt + 1} 次，impersonate={imp}，"
+                    f"oai-did 已种，共 {len(cookies)} 个 cookie）"
                 )
                 return True
 
             logger.warning(
-                f"warmup 第 {attempt + 1}/4 次未种到 oai-did"
-                + (f"（HTTP {status}）" if status is not None else "")
+                f"warmup 第 {attempt + 1}/4 次未种到 oai-did（impersonate={imp}"
+                + (f"，HTTP {status}）" if status is not None else "）")
                 + (f"，已有 cookie: {sorted(cookies)}" if cookies else "，无任何 cookie")
             )
 
-        logger.error("warmup 4 次均未种到 oai-did cookie —— 此时继续走注册链必然 409 invalid_state")
+        logger.error(
+            "warmup 4 次均未种到 oai-did cookie（已轮换浏览器家族）"
+            " —— 此时继续走注册链必然 409 invalid_state"
+        )
         return False
 
     # ── Step 1: 检查代理连通性 ──
